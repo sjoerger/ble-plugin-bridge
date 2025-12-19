@@ -148,7 +148,18 @@ class ServiceStatusActivity : AppCompatActivity() {
             } else {
                 appendLine("  ✅ Available")
                 appendLine("  State: ${getBluetoothState(bluetoothAdapter.state)}")
-                appendLine("  Address: ${bluetoothAdapter.address ?: "Unknown"}")
+                // Don't try to get address without BLUETOOTH_CONNECT permission
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    ContextCompat.checkSelfPermission(this@ServiceStatusActivity, 
+                        Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    appendLine("  Address: (need BLUETOOTH_CONNECT permission)")
+                } else {
+                    try {
+                        appendLine("  Address: ${bluetoothAdapter.address ?: "Unknown"}")
+                    } catch (e: SecurityException) {
+                        appendLine("  Address: (permission denied)")
+                    }
+                }
             }
             appendLine()
             
