@@ -29,8 +29,7 @@ class PluginRegistry {
     }
     
     private val mutex = Mutex()
-    private var currentBlePlugin: BlePluginInterface? = null
-    private var currentBlePluginId: String? = null
+    private val loadedBlePlugins = mutableMapOf<String, BlePluginInterface>()
     private var outputPlugin: OutputPluginInterface? = null
     
     // Plugin factory map: pluginId -> factory function
@@ -55,8 +54,8 @@ class PluginRegistry {
     }
     
     /**
-     * Get the currently loaded BLE plugin.
-     * Loads it if not already loaded (lazy initialization).
+     * Get a BLE plugin (loaded or loads it on-demand).
+     * Supports multiple plugins loaded simultaneously.
      * 
      * @param pluginId The plugin to load
      * @param context Android context for initialization
@@ -69,19 +68,9 @@ class PluginRegistry {
         config: Map<String, String>
     ): BlePluginInterface? = mutex.withLock {
         // If we already have this plugin loaded, return it
-        if (currentBlePluginId == pluginId && currentBlePlugin != null) {
+        loadedBlePlugins[pluginId]?.let {
             Log.d(TAG, "BLE plugin already loaded: $pluginId")
-            return@withLock currentBlePlugin
-        }
-        
-        // Unload current plugin if different
-        if (currentBlePlugin != null && currentBlePluginId != pluginId) {
-            Log.i(TAG, "Unloading BLE plugin: $currentBlePluginId")
-            currentBlePlugin?.cleanup()
-            currentBlePlugin = null
-            currentBlePluginId = null
-            // Suggest GC to reclaim memory
-            System.gc()
+            return@withLock it
         }
         
         // Load new plugin
@@ -97,9 +86,8 @@ class PluginRegistry {
             val result = plugin.initialize(context, config)
             
             if (result.isSuccess) {
-                currentBlePlugin = plugin
-                currentBlePluginId = pluginId
-                Log.i(TAG, "BLE plugin loaded successfully: $pluginId v${plugin.getPluginVersion()}")
+                loadedBlePlugins[pluginId] = plugin
+                Log.i(TAG, "BLE plugin loaded successfully: $pluginId v${plugin.getPluginVersion()} (${loadedBlePlugins.size} total)")
                 return@withLock plugin
             } else {
                 Log.e(TAG, "Failed to initialize BLE plugin $pluginId: ${result.exceptionOrNull()?.message}")
@@ -113,27 +101,30 @@ class PluginRegistry {
     
     /**
      * Find which plugin can handle a discovered device.
+     * Checks loaded plugins first (fast), then factory creates temporary instances.
      * 
      * @param device The discovered Bluetooth device
      * @param scanRecord Raw scan record data
      * @return Plugin ID if a match is found, null otherwise
      */
     fun findPluginForDevice(device: BluetoothDevice, scanRecord: ByteArray?): String? {
-        // Check currently loaded plugin first (fast path)
-        if (currentBlePlugin?.canHandleDevice(device, scanRecord) == true) {
-            return currentBlePluginId
+        // Check already loaded plugins first (fast path)
+        for ((pluginId, plugin) in loadedBlePlugins) {
+            if (plugin.canHandleDevice(device, scanRecord)) {
+                Log.d(TAG, "Device ${device.address} matches loaded plugin: $pluginId")
+                return pluginId
+            }
         }
         
-        // Check other registered plugins
-        // Note: We create temporary instances just to check canHandleDevice
+        // Check other registered plugins by creating temporary instances
         // This is lightweight since we don't initialize them
         for ((pluginId, factory) in blePluginFactories) {
-            if (pluginId == currentBlePluginId) continue // already checked
+            if (loadedBlePlugins.containsKey(pluginId)) continue // already checked
             
             try {
                 val tempPlugin = factory()
                 if (tempPlugin.canHandleDevice(device, scanRecord)) {
-                    Log.d(TAG, "Device ${device.address} matches plugin: $pluginId")
+                    Log.d(TAG, "Device ${device.address} matches plugin: $pluginId (not loaded yet)")
                     return pluginId
                 }
             } catch (e: Exception) {
@@ -185,9 +176,14 @@ class PluginRegistry {
     }
     
     /**
-     * Get the currently loaded BLE plugin (if any).
+     * Get a specific loaded BLE plugin.
      */
-    fun getCurrentBlePlugin(): BlePluginInterface? = currentBlePlugin
+    fun getLoadedBlePlugin(pluginId: String): BlePluginInterface? = loadedBlePlugins[pluginId]
+    
+    /**
+     * Get all currently loaded BLE plugins.
+     */
+    fun getLoadedBlePlugins(): Map<String, BlePluginInterface> = loadedBlePlugins.toMap()
     
     /**
      * Get the currently loaded output plugin (if any).
@@ -195,14 +191,29 @@ class PluginRegistry {
     fun getCurrentOutputPlugin(): OutputPluginInterface? = outputPlugin
     
     /**
+     * Unload a specific BLE plugin.
+     * Called when last device of this type disconnects.
+     */
+    suspend fun unloadBlePlugin(pluginId: String) = mutex.withLock {
+        loadedBlePlugins[pluginId]?.let { plugin ->
+            Log.i(TAG, "Unloading BLE plugin: $pluginId")
+            plugin.cleanup()
+            loadedBlePlugins.remove(pluginId)
+            System.gc()
+        }
+    }
+    
+    /**
      * Unload all plugins and cleanup resources.
      */
     suspend fun cleanup() = mutex.withLock {
-        Log.i(TAG, "Cleaning up all plugins")
+        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins)")
         
-        currentBlePlugin?.cleanup()
-        currentBlePlugin = null
-        currentBlePluginId = null
+        for ((pluginId, plugin) in loadedBlePlugins) {
+            Log.i(TAG, "Cleaning up BLE plugin: $pluginId")
+            plugin.cleanup()
+        }
+        loadedBlePlugins.clear()
         
         outputPlugin?.disconnect()
         outputPlugin = null

@@ -23,9 +23,12 @@ class PluginRegistryTest {
     private lateinit var mockContext: Context
     
     @Before
-    fun setup() {
+    fun setup() = runBlocking {
         registry = PluginRegistry.getInstance()
         mockContext = mock(Context::class.java)
+        
+        // Clean up any loaded plugins from previous tests
+        registry.cleanup()
     }
     
     @Test
@@ -78,24 +81,26 @@ class PluginRegistryTest {
     }
     
     @Test
-    fun testUnloadOnSwitch() = runBlocking {
-        val plugin1 = createMockBlePlugin("switch_plugin1")
-        val plugin2 = createMockBlePlugin("switch_plugin2")
+    fun testMultiplePluginsLoaded() = runBlocking {
+        val plugin1 = createMockBlePlugin("multi_plugin1")
+        val plugin2 = createMockBlePlugin("multi_plugin2")
         
-        registry.registerBlePlugin("switch_plugin1") { plugin1 }
-        registry.registerBlePlugin("switch_plugin2") { plugin2 }
+        registry.registerBlePlugin("multi_plugin1") { plugin1 }
+        registry.registerBlePlugin("multi_plugin2") { plugin2 }
         
         // Load plugin1
-        val p1 = registry.getBlePlugin("switch_plugin1", mockContext, emptyMap())
-        assertEquals("switch_plugin1", p1?.getPluginId())
+        val p1 = registry.getBlePlugin("multi_plugin1", mockContext, emptyMap())
+        assertEquals("multi_plugin1", p1?.getPluginId())
         
-        // Load plugin2 - should unload plugin1
-        val p2 = registry.getBlePlugin("switch_plugin2", mockContext, emptyMap())
-        assertEquals("switch_plugin2", p2?.getPluginId())
+        // Load plugin2 - should NOT unload plugin1
+        val p2 = registry.getBlePlugin("multi_plugin2", mockContext, emptyMap())
+        assertEquals("multi_plugin2", p2?.getPluginId())
         
-        // Current plugin should be plugin2
-        val current = registry.getCurrentBlePlugin()
-        assertEquals("switch_plugin2", current?.getPluginId())
+        // Both plugins should be loaded
+        val loaded = registry.getLoadedBlePlugins()
+        assertEquals(2, loaded.size)
+        assertTrue(loaded.containsKey("multi_plugin1"))
+        assertTrue(loaded.containsKey("multi_plugin2"))
     }
     
     @Test
@@ -127,6 +132,29 @@ class PluginRegistryTest {
         
         val foundPluginId = registry.findPluginForDevice(mockDevice, null)
         assertEquals("finder_test", foundPluginId)
+    }
+    
+    @Test
+    fun testUnloadSpecificPlugin() = runBlocking {
+        val plugin1 = createMockBlePlugin("unload_test1")
+        val plugin2 = createMockBlePlugin("unload_test2")
+        
+        registry.registerBlePlugin("unload_test1") { plugin1 }
+        registry.registerBlePlugin("unload_test2") { plugin2 }
+        
+        // Load both plugins
+        registry.getBlePlugin("unload_test1", mockContext, emptyMap())
+        registry.getBlePlugin("unload_test2", mockContext, emptyMap())
+        
+        assertEquals(2, registry.getLoadedBlePlugins().size)
+        
+        // Unload plugin1
+        registry.unloadBlePlugin("unload_test1")
+        
+        val loaded = registry.getLoadedBlePlugins()
+        assertEquals(1, loaded.size)
+        assertTrue(loaded.containsKey("unload_test2"))
+        assertNull(registry.getLoadedBlePlugin("unload_test1"))
     }
     
     @Test

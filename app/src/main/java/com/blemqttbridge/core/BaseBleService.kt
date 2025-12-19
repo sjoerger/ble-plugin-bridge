@@ -47,8 +47,8 @@ class BaseBleService : Service() {
     private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
     
-    // Connected devices map: device address -> BluetoothGatt
-    private val connectedDevices = mutableMapOf<String, BluetoothGatt>()
+    // Connected devices map: device address -> (BluetoothGatt, pluginId)
+    private val connectedDevices = mutableMapOf<String, Pair<BluetoothGatt, String>>()
     
     // Polling jobs for devices that need periodic updates
     private val pollingJobs = mutableMapOf<String, Job>()
@@ -212,9 +212,18 @@ class BaseBleService : Service() {
                 // Stop scanning (we found a device)
                 stopScanning()
                 
-                // Connect to device
+                // Load plugin and connect to device
                 serviceScope.launch {
-                    connectToDevice(device)
+                    // Load the plugin if not already loaded
+                    val plugin = pluginRegistry.getBlePlugin(pluginId, applicationContext, emptyMap())
+                    if (plugin != null) {
+                        connectToDevice(device, pluginId)
+                    } else {
+                        Log.e(TAG, "Failed to load plugin $pluginId for device ${device.address}")
+                        updateNotification("Error: Failed to load plugin $pluginId")
+                        // Resume scanning
+                        startScanning()
+                    }
                 }
             }
         }
@@ -229,8 +238,8 @@ class BaseBleService : Service() {
     /**
      * Connect to a BLE device.
      */
-    private suspend fun connectToDevice(device: BluetoothDevice) {
-        Log.i(TAG, "Connecting to ${device.address}")
+    private suspend fun connectToDevice(device: BluetoothDevice, pluginId: String) {
+        Log.i(TAG, "Connecting to ${device.address} (plugin: $pluginId)")
         updateNotification("Connecting to ${device.address}...")
         
         try {
@@ -241,7 +250,7 @@ class BaseBleService : Service() {
                 BluetoothDevice.TRANSPORT_LE
             )
             
-            connectedDevices[device.address] = gatt
+            connectedDevices[device.address] = Pair(gatt, pluginId)
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")
@@ -254,15 +263,22 @@ class BaseBleService : Service() {
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             val device = gatt.device
+            val deviceInfo = connectedDevices[device.address]
+            val pluginId = deviceInfo?.second
             
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "Connected to ${device.address}")
+                    Log.i(TAG, "Connected to ${device.address} (plugin: $pluginId)")
                     updateNotification("Connected to ${device.address}")
                     
                     serviceScope.launch {
+                        // Get the plugin for this device
+                        val plugin = if (pluginId != null) {
+                            pluginRegistry.getLoadedBlePlugin(pluginId)
+                        } else null
+                        
                         // Notify plugin of connection
-                        blePlugin?.onDeviceConnected(device)
+                        plugin?.onDeviceConnected(device)
                         
                         // Discover services
                         try {
@@ -272,7 +288,9 @@ class BaseBleService : Service() {
                         }
                         
                         // Start polling if needed
-                        startPollingIfNeeded(device)
+                        if (plugin != null) {
+                            startPollingIfNeeded(device, plugin)
+                        }
                         
                         // Publish availability
                         publishAvailability(device, true)
@@ -288,8 +306,22 @@ class BaseBleService : Service() {
                     pollingJobs.remove(device.address)
                     
                     serviceScope.launch {
-                        blePlugin?.onDeviceDisconnected(device)
+                        // Get the plugin for this device
+                        val plugin = if (pluginId != null) {
+                            pluginRegistry.getLoadedBlePlugin(pluginId)
+                        } else null
+                        
+                        plugin?.onDeviceDisconnected(device)
                         publishAvailability(device, false)
+                        
+                        // Check if this was the last device using this plugin
+                        if (pluginId != null) {
+                            val stillUsed = connectedDevices.values.any { it.second == pluginId }
+                            if (!stillUsed) {
+                                Log.i(TAG, "No devices using plugin $pluginId, unloading")
+                                pluginRegistry.unloadBlePlugin(pluginId)
+                            }
+                        }
                     }
                     
                     gatt.close()
@@ -334,8 +366,12 @@ class BaseBleService : Service() {
         characteristicUuid: String,
         value: ByteArray
     ) {
-        val plugin = blePlugin ?: return
         val output = outputPlugin ?: return
+        
+        // Get the plugin for this device
+        val deviceInfo = connectedDevices[device.address]
+        val pluginId = deviceInfo?.second ?: return
+        val plugin = pluginRegistry.getLoadedBlePlugin(pluginId) ?: return
         
         try {
             val stateUpdates = plugin.onCharacteristicNotification(device, characteristicUuid, value)
@@ -352,15 +388,15 @@ class BaseBleService : Service() {
     /**
      * Start periodic polling if plugin requires it.
      */
-    private fun startPollingIfNeeded(device: BluetoothDevice) {
-        val intervalMs = blePlugin?.getPollingIntervalMs() ?: return
+    private fun startPollingIfNeeded(device: BluetoothDevice, plugin: BlePluginInterface) {
+        val intervalMs = plugin.getPollingIntervalMs() ?: return
         
         val job = serviceScope.launch {
             while (isActive) {
                 delay(intervalMs)
                 
                 try {
-                    blePlugin?.performPeriodicPoll(device)
+                    plugin.performPeriodicPoll(device)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error during polling", e)
                 }
@@ -375,8 +411,12 @@ class BaseBleService : Service() {
      * Publish Home Assistant discovery payloads.
      */
     private suspend fun publishDiscovery(device: BluetoothDevice) {
-        val plugin = blePlugin ?: return
         val output = outputPlugin ?: return
+        
+        // Get the plugin for this device
+        val deviceInfo = connectedDevices[device.address]
+        val pluginId = deviceInfo?.second ?: return
+        val plugin = pluginRegistry.getLoadedBlePlugin(pluginId) ?: return
         
         try {
             val discoveryPayloads = plugin.getDiscoveryPayloads(device)
@@ -402,9 +442,10 @@ class BaseBleService : Service() {
      * Disconnect all devices.
      */
     private fun disconnectAll() {
-        Log.i(TAG, "Disconnecting all devices")
+        Log.i(TAG, "Disconnecting all devices (${connectedDevices.size} connected)")
         
-        for ((address, gatt) in connectedDevices) {
+        for ((_, deviceInfo) in connectedDevices) {
+            val (gatt, _) = deviceInfo
             try {
                 gatt.disconnect()
             } catch (e: SecurityException) {
