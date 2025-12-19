@@ -63,6 +63,22 @@ interface BlePluginInterface {
     suspend fun onDeviceConnected(device: BluetoothDevice): Result<Unit>
     
     /**
+     * Called after GATT services have been discovered.
+     * Plugin can request characteristic operations for authentication, setup, etc.
+     * 
+     * @param device The connected Bluetooth device
+     * @param gattOperations Interface for performing GATT operations
+     * @return Result indicating success or failure
+     */
+    suspend fun onServicesDiscovered(
+        device: BluetoothDevice,
+        gattOperations: GattOperations
+    ): Result<Unit> {
+        // Default: no setup needed
+        return Result.success(Unit)
+    }
+    
+    /**
      * Called when a device disconnects.
      * Plugin should clean up any device-specific state.
      * 
@@ -135,4 +151,39 @@ interface BlePluginInterface {
      * Called when plugin is unloaded or app is shutting down.
      */
     suspend fun cleanup()
+    
+    /**
+     * Interface for performing GATT operations on a connected device.
+     * Provided to plugins during onServicesDiscovered callback.
+     */
+    interface GattOperations {
+        /**
+         * Read a characteristic value.
+         * @param uuid Characteristic UUID
+         * @return Result with byte array value or failure
+         */
+        suspend fun readCharacteristic(uuid: String): Result<ByteArray>
+        
+        /**
+         * Write a characteristic value.
+         * @param uuid Characteristic UUID
+         * @param value Bytes to write
+         * @return Result indicating success or failure
+         */
+        suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit>
+        
+        /**
+         * Enable notifications on a characteristic.
+         * @param uuid Characteristic UUID
+         * @return Result indicating success or failure
+         */
+        suspend fun enableNotifications(uuid: String): Result<Unit>
+        
+        /**
+         * Disable notifications on a characteristic.
+         * @param uuid Characteristic UUID
+         * @return Result indicating success or failure
+         */
+        suspend fun disableNotifications(uuid: String): Result<Unit>
+    }
 }
