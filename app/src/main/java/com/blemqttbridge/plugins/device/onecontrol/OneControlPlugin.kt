@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.plugins.device.onecontrol.protocol.Constants
+import com.blemqttbridge.plugins.device.onecontrol.protocol.TeaEncryption
 
 /**
  * OneControl BLE Gateway Plugin
@@ -43,6 +44,8 @@ class OneControlPlugin : BlePluginInterface {
     
     // Connection state tracking
     private val connectedDevices = mutableSetOf<String>()  // Device addresses
+    private val authenticatedDevices = mutableSetOf<String>()  // Authenticated devices
+    private var gattOperations: BlePluginInterface.GattOperations? = null
     
     override fun getPluginId(): String = PLUGIN_ID
     
@@ -105,10 +108,81 @@ class OneControlPlugin : BlePluginInterface {
         return Result.success(Unit)
     }
     
+    override suspend fun onServicesDiscovered(
+        device: BluetoothDevice,
+        gattOperations: BlePluginInterface.GattOperations
+    ): Result<Unit> {
+        this.gattOperations = gattOperations
+        
+        Log.i(TAG, "🔐 Starting TEA authentication for ${device.address}...")
+        
+        return try {
+            // Step 1: Read SEED from gateway
+            Log.d(TAG, "Reading SEED from ${Constants.SEED_CHAR_UUID}")
+            val seedResult = gattOperations.readCharacteristic(Constants.SEED_CHAR_UUID)
+            if (seedResult.isFailure) {
+                return Result.failure(Exception("Failed to read SEED: ${seedResult.exceptionOrNull()?.message}"))
+            }
+            
+            val seedBytes = seedResult.getOrThrow()
+            if (seedBytes.size != 4) {
+                return Result.failure(Exception("Invalid SEED size: ${seedBytes.size}, expected 4"))
+            }
+            
+            // Convert bytes to long (little-endian)
+            val seed = ((seedBytes[3].toLong() and 0xFF) shl 24) or
+                      ((seedBytes[2].toLong() and 0xFF) shl 16) or
+                      ((seedBytes[1].toLong() and 0xFF) shl 8) or
+                      (seedBytes[0].toLong() and 0xFF)
+            
+            Log.d(TAG, "Seed: 0x${seed.toString(16).padStart(8, '0')}")
+            
+            // Step 2: Encrypt seed with TEA using gateway cypher
+            val encryptedKey = TeaEncryption.encrypt(gatewayCypher, seed)
+            Log.d(TAG, "Key: 0x${encryptedKey.toString(16).padStart(8, '0')}")
+            
+            // Step 3: Convert encrypted key to bytes (little-endian)
+            val keyBytes = byteArrayOf(
+                (encryptedKey and 0xFF).toByte(),
+                ((encryptedKey shr 8) and 0xFF).toByte(),
+                ((encryptedKey shr 16) and 0xFF).toByte(),
+                ((encryptedKey shr 24) and 0xFF).toByte()
+            )
+            
+            // Step 4: Write encrypted key back to gateway
+            Log.d(TAG, "Writing KEY to ${Constants.KEY_CHAR_UUID}")
+            val writeResult = gattOperations.writeCharacteristic(Constants.KEY_CHAR_UUID, keyBytes)
+            if (writeResult.isFailure) {
+                return Result.failure(Exception("Failed to write KEY: ${writeResult.exceptionOrNull()?.message}"))
+            }
+            
+            Log.i(TAG, "✅ Authentication complete!")
+            
+            // Step 5: Subscribe to CAN notifications
+            Log.d(TAG, "Subscribing to CAN notifications: ${Constants.CAN_READ_CHAR_UUID}")
+            val notifyResult = gattOperations.enableNotifications(Constants.CAN_READ_CHAR_UUID)
+            if (notifyResult.isFailure) {
+                Log.w(TAG, "⚠️ Failed to subscribe to CAN: ${notifyResult.exceptionOrNull()?.message}")
+                // Don't fail auth if subscription fails - can retry later
+            } else {
+                Log.i(TAG, "✅ Subscribed to CAN notifications")
+            }
+            
+            authenticatedDevices.add(device.address)
+            Result.success(Unit)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Authentication failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+    
     override suspend fun onDeviceDisconnected(device: BluetoothDevice) {
         Log.i(TAG, "🔌 Device disconnected: ${device.address}")
         
         connectedDevices.remove(device.address)
+        authenticatedDevices.remove(device.address)
+        gattOperations = null
     }
     
     override suspend fun onCharacteristicNotification(

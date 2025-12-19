@@ -54,6 +54,10 @@ class BaseBleService : Service() {
     // Polling jobs for devices that need periodic updates
     private val pollingJobs = mutableMapOf<String, Job>()
     
+    // Pending GATT operations: characteristic UUID -> result deferred
+    private val pendingReads = mutableMapOf<String, CompletableDeferred<Result<ByteArray>>>()
+    private val pendingWrites = mutableMapOf<String, CompletableDeferred<Result<Unit>>>()
+    
     private var isScanning = false
     
     override fun onCreate() {
@@ -350,6 +354,24 @@ class BaseBleService : Service() {
                 Log.i(TAG, "Services discovered for ${gatt.device.address}")
                 
                 serviceScope.launch {
+                    // Get the plugin for this device
+                    val deviceInfo = connectedDevices[gatt.device.address]
+                    val pluginId = deviceInfo?.second
+                    val plugin = if (pluginId != null) {
+                        pluginRegistry.getLoadedBlePlugin(pluginId)
+                    } else null
+                    
+                    if (plugin != null) {
+                        // Create GATT operations interface for plugin
+                        val gattOps = GattOperationsImpl(gatt)
+                        
+                        // Call plugin setup (authentication, notification subscription, etc.)
+                        val setupResult = plugin.onServicesDiscovered(gatt.device, gattOps)
+                        if (setupResult.isFailure) {
+                            Log.e(TAG, "Plugin setup failed: ${setupResult.exceptionOrNull()?.message}")
+                        }
+                    }
+                    
                     // Publish Home Assistant discovery
                     publishDiscovery(gatt.device)
                 }
@@ -365,6 +387,45 @@ class BaseBleService : Service() {
         ) {
             serviceScope.launch {
                 handleCharacteristicNotification(gatt.device, characteristic.uuid.toString(), value)
+            }
+        }
+        
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            val deferred = pendingReads.remove(uuid)
+            
+            if (deferred != null) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.d(TAG, "Read success for $uuid: ${value.size} bytes")
+                    deferred.complete(Result.success(value))
+                } else {
+                    Log.e(TAG, "Read failed for $uuid: status=$status")
+                    deferred.complete(Result.failure(Exception("GATT read failed: status=$status")))
+                }
+            }
+        }
+        
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            val deferred = pendingWrites.remove(uuid)
+            
+            if (deferred != null) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.d(TAG, "Write success for $uuid")
+                    deferred.complete(Result.success(Unit))
+                } else {
+                    Log.e(TAG, "Write failed for $uuid: status=$status")
+                    deferred.complete(Result.failure(Exception("GATT write failed: status=$status")))
+                }
             }
         }
     }
@@ -527,5 +588,185 @@ class BaseBleService : Service() {
     private fun updateNotification(text: String) {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, createNotification(text))
+    }
+    
+    /**
+     * GATT operations implementation for plugins.
+     * Provides async methods for reading/writing characteristics and managing notifications.
+     */
+    private inner class GattOperationsImpl(private val gatt: BluetoothGatt) : BlePluginInterface.GattOperations {
+        
+        override suspend fun readCharacteristic(uuid: String): Result<ByteArray> = withContext(Dispatchers.IO) {
+            val characteristic = findCharacteristic(uuid)
+            if (characteristic == null) {
+                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
+            }
+            
+            val normalizedUuid = uuid.lowercase()
+            val deferred = CompletableDeferred<Result<ByteArray>>()
+            pendingReads[normalizedUuid] = deferred
+            
+            try {
+                val success = gatt.readCharacteristic(characteristic)
+                if (!success) {
+                    pendingReads.remove(normalizedUuid)
+                    return@withContext Result.failure(Exception("Failed to initiate read for $uuid"))
+                }
+                
+                // Wait for callback with timeout
+                withTimeout(5000) {
+                    deferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                pendingReads.remove(normalizedUuid)
+                Result.failure(Exception("Read timeout for $uuid"))
+            } catch (e: SecurityException) {
+                pendingReads.remove(normalizedUuid)
+                Result.failure(Exception("Permission denied for read: $uuid"))
+            } catch (e: Exception) {
+                pendingReads.remove(normalizedUuid)
+                Result.failure(e)
+            }
+        }
+        
+        override suspend fun writeCharacteristic(uuid: String, value: ByteArray): Result<Unit> = withContext(Dispatchers.IO) {
+            val characteristic = findCharacteristic(uuid)
+            if (characteristic == null) {
+                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
+            }
+            
+            val normalizedUuid = uuid.lowercase()
+            val deferred = CompletableDeferred<Result<Unit>>()
+            pendingWrites[normalizedUuid] = deferred
+            
+            try {
+                // Android 13+ (API 33) uses new writeCharacteristic signature
+                val success = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeCharacteristic(
+                        characteristic,
+                        value,
+                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    ) == BluetoothStatusCodes.SUCCESS
+                } else {
+                    @Suppress("DEPRECATION")
+                    characteristic.value = value
+                    @Suppress("DEPRECATION")
+                    gatt.writeCharacteristic(characteristic)
+                }
+                
+                if (!success) {
+                    pendingWrites.remove(normalizedUuid)
+                    return@withContext Result.failure(Exception("Failed to initiate write for $uuid"))
+                }
+                
+                // Wait for callback with timeout
+                withTimeout(5000) {
+                    deferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                pendingWrites.remove(normalizedUuid)
+                Result.failure(Exception("Write timeout for $uuid"))
+            } catch (e: SecurityException) {
+                pendingWrites.remove(normalizedUuid)
+                Result.failure(Exception("Permission denied for write: $uuid"))
+            } catch (e: Exception) {
+                pendingWrites.remove(normalizedUuid)
+                Result.failure(e)
+            }
+        }
+        
+        override suspend fun enableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.IO) {
+            val characteristic = findCharacteristic(uuid)
+            if (characteristic == null) {
+                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
+            }
+            
+            try {
+                // Enable local notifications
+                val success = gatt.setCharacteristicNotification(characteristic, true)
+                if (!success) {
+                    return@withContext Result.failure(Exception("Failed to enable notifications for $uuid"))
+                }
+                
+                // Write descriptor to enable notifications on remote device
+                val descriptor = characteristic.getDescriptor(
+                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb") // Client Characteristic Configuration
+                )
+                
+                if (descriptor != null) {
+                    val descriptorValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(descriptor, descriptorValue)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        descriptor.value = descriptorValue
+                        @Suppress("DEPRECATION")
+                        gatt.writeDescriptor(descriptor)
+                    }
+                    
+                    Log.d(TAG, "Enabled notifications for $uuid")
+                } else {
+                    Log.w(TAG, "No CCCD descriptor found for $uuid")
+                }
+                
+                Result.success(Unit)
+            } catch (e: SecurityException) {
+                Result.failure(Exception("Permission denied for notifications: $uuid"))
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+        
+        override suspend fun disableNotifications(uuid: String): Result<Unit> = withContext(Dispatchers.IO) {
+            val characteristic = findCharacteristic(uuid)
+            if (characteristic == null) {
+                return@withContext Result.failure(Exception("Characteristic not found: $uuid"))
+            }
+            
+            try {
+                gatt.setCharacteristicNotification(characteristic, false)
+                
+                val descriptor = characteristic.getDescriptor(
+                    UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+                )
+                
+                if (descriptor != null) {
+                    val descriptorValue = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(descriptor, descriptorValue)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        descriptor.value = descriptorValue
+                        @Suppress("DEPRECATION")
+                        gatt.writeDescriptor(descriptor)
+                    }
+                    
+                    Log.d(TAG, "Disabled notifications for $uuid")
+                }
+                
+                Result.success(Unit)
+            } catch (e: SecurityException) {
+                Result.failure(Exception("Permission denied for notifications: $uuid"))
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+        
+        /**
+         * Find a characteristic by UUID across all services.
+         */
+        private fun findCharacteristic(uuid: String): BluetoothGattCharacteristic? {
+            val targetUuid = UUID.fromString(uuid)
+            for (service in gatt.services) {
+                for (characteristic in service.characteristics) {
+                    if (characteristic.uuid == targetUuid) {
+                        return characteristic
+                    }
+                }
+            }
+            return null
+        }
     }
 }
