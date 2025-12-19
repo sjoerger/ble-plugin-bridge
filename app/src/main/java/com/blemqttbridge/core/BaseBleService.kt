@@ -84,9 +84,9 @@ class BaseBleService : Service() {
                 val blePluginId = intent.getStringExtra(EXTRA_BLE_PLUGIN_ID) ?: "onecontrol"
                 val outputPluginId = intent.getStringExtra(EXTRA_OUTPUT_PLUGIN_ID) ?: "mqtt"
                 
-                // Config maps would come from SharedPreferences or intent extras
-                val bleConfig = emptyMap<String, String>() // TODO: Load from preferences
-                val outputConfig = emptyMap<String, String>() // TODO: Load from preferences
+                // Load configuration from SharedPreferences
+                val bleConfig = AppConfig.getBlePluginConfig(applicationContext, blePluginId)
+                val outputConfig = AppConfig.getMqttConfig(applicationContext)
                 
                 serviceScope.launch {
                     initializePlugins(blePluginId, outputPluginId, bleConfig, outputConfig)
