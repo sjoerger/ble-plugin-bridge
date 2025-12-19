@@ -5,7 +5,6 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.plugins.device.onecontrol.protocol.Constants
-import com.blemqttbridge.plugins.device.onecontrol.protocol.TeaEncryption
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -163,11 +162,11 @@ class OneControlPlugin : BlePluginInterface {
                     
                     Log.d(TAG, "Challenge: 0x${challenge.toString(16).padStart(8, '0')}")
                     
-                    // Encrypt with TEA (using gateway cypher)
-                    val keyValue = TeaEncryption.encrypt(gatewayCypher, challenge.toLong() and 0xFFFFFFFFL)
+                    // Encrypt using BleDeviceUnlockManager.Encrypt() algorithm from original app
+                    val keyValue = calculateAuthKey(challenge.toLong() and 0xFFFFFFFFL)
                     Log.d(TAG, "KEY: 0x${keyValue.toString(16).padStart(8, '0')}")
                     
-                    // Convert to big-endian bytes
+                    // Convert KEY result to big-endian bytes
                     val keyBytes = byteArrayOf(
                         ((keyValue shr 24) and 0xFF).toByte(),
                         ((keyValue shr 16) and 0xFF).toByte(),
@@ -254,6 +253,59 @@ class OneControlPlugin : BlePluginInterface {
                 }
                 
                 unlockedDevices.add(device.address)
+                
+                // STEP 2: TEA SEED/KEY Authentication (Only for CAN Service gateways)
+                Log.i(TAG, "🔐 Starting TEA SEED/KEY authentication...")
+                
+                // Read SEED from AUTH service
+                val seedResult = gattOperations.readCharacteristic(Constants.SEED_CHAR_UUID)
+                if (seedResult.isFailure) {
+                    return Result.failure(Exception("Failed to read SEED: ${seedResult.exceptionOrNull()?.message}"))
+                }
+                
+                val seedBytes = seedResult.getOrThrow()
+                if (seedBytes.size != 4) {
+                    return Result.failure(Exception("Invalid SEED size: ${seedBytes.size}, expected 4"))
+                }
+                
+                // Extract 32-bit seed (little-endian for CAN Service)
+                val seed = ((seedBytes[3].toLong() and 0xFF) shl 24) or
+                          ((seedBytes[2].toLong() and 0xFF) shl 16) or
+                          ((seedBytes[1].toLong() and 0xFF) shl 8) or
+                          (seedBytes[0].toLong() and 0xFF)
+                
+                Log.d(TAG, "Read SEED: 0x${seed.toString(16).padStart(8, '0')}")
+                
+                // Encrypt seed with TEA (using CAN Service cypher = 0x8100080DL)
+                val encryptedKey = calculateTeaKey(gatewayCypher, seed)
+                Log.d(TAG, "Encrypted KEY: 0x${encryptedKey.toString(16).padStart(8, '0')}")
+                
+                // Write encrypted key back (little-endian for CAN Service)
+                val keyBytes = byteArrayOf(
+                    (encryptedKey and 0xFF).toByte(),
+                    ((encryptedKey shr 8) and 0xFF).toByte(),
+                    ((encryptedKey shr 16) and 0xFF).toByte(),
+                    ((encryptedKey shr 24) and 0xFF).toByte()
+                )
+                
+                val keyWriteResult = gattOperations.writeCharacteristic(Constants.KEY_CHAR_UUID, keyBytes)
+                if (keyWriteResult.isFailure) {
+                    return Result.failure(Exception("Failed to write KEY: ${keyWriteResult.exceptionOrNull()?.message}"))
+                }
+                
+                Log.i(TAG, "✅ TEA authentication complete!")
+                
+                // Subscribe to CAN notifications
+                Log.d(TAG, "Subscribing to CAN notifications: ${Constants.CAN_READ_CHAR_UUID}")
+                val notifyResult = gattOperations.enableNotifications(Constants.CAN_READ_CHAR_UUID)
+                if (notifyResult.isFailure) {
+                    Log.w(TAG, "⚠️ Failed to subscribe to CAN: ${notifyResult.exceptionOrNull()?.message}")
+                } else {
+                    Log.i(TAG, "✅ Subscribed to CAN notifications")
+                }
+                
+                authenticatedDevices.add(device.address)
+                return Result.success(Unit)
             }
             
             // STEP 2: TEA AUTHENTICATION (SEED/KEY exchange)
@@ -282,7 +334,7 @@ class OneControlPlugin : BlePluginInterface {
             Log.d(TAG, "Seed: 0x${seed.toString(16).padStart(8, '0')}")
             
             // Step 3: Encrypt seed with TEA using gateway cypher
-            val encryptedKey = TeaEncryption.encrypt(gatewayCypher, seed)
+            val encryptedKey = calculateTeaKey(gatewayCypher, seed)
             Log.d(TAG, "Key: 0x${encryptedKey.toString(16).padStart(8, '0')}")
             
             // Step 4: Convert encrypted key to bytes (little-endian)
@@ -459,6 +511,55 @@ class OneControlPlugin : BlePluginInterface {
         }
         
         return uuids
+    }
+    
+    /**
+     * Calculate authentication KEY from challenge using BleDeviceUnlockManager.Encrypt() algorithm
+     * From original OneControlBleService: MyRvLinkBleGatewayScanResult.RvLinkKeySeedCypher = 612643285
+     * Byte order: BIG-ENDIAN for both challenge and KEY (Data Service only)
+     */
+    private fun calculateAuthKey(seed: Long): Long {
+        val cypher = 612643285L  // MyRvLink RvLinkKeySeedCypher = 0x2483FFD5
+        
+        var cypherVar = cypher
+        var seedVar = seed
+        var num = 2654435769L  // TEA delta = 0x9E3779B9
+        
+        // BleDeviceUnlockManager.Encrypt() algorithm - exact copy from original app
+        for (i in 0 until 32) {
+            seedVar += ((cypherVar shl 4) + 1131376761L) xor (cypherVar + num) xor ((cypherVar shr 5) + 1919510376L)
+            seedVar = seedVar and 0xFFFFFFFFL
+            cypherVar += ((seedVar shl 4) + 1948272964L) xor (seedVar + num) xor ((seedVar shr 5) + 1400073827L)
+            cypherVar = cypherVar and 0xFFFFFFFFL
+            num += 2654435769L
+            num = num and 0xFFFFFFFFL
+        }
+        
+        // Return the calculated value
+        return seedVar and 0xFFFFFFFFL
+    }
+    
+    /**
+     * TEA encryption for CAN Service gateways (different algorithm)
+     * From original OneControlBleService: TeaEncryption.encrypt() with cypher 0x8100080DL
+     * Byte order: LITTLE-ENDIAN for both seed and key (CAN Service only)
+     */
+    private fun calculateTeaKey(cypher: Long, seed: Long): Long {
+        var v0 = seed
+        var v1 = cypher
+        val delta = 0x9e3779b9L
+        var sum = 0L
+        
+        // 32 rounds of TEA encryption
+        for (i in 0 until 32) {
+            sum += delta
+            v0 += ((v1 shl 4) + (cypher and 0xFFFFL)) xor (v1 + sum) xor ((v1 shr 5) + ((cypher shr 16) and 0xFFFFL))
+            v0 = v0 and 0xFFFFFFFFL
+            v1 += ((v0 shl 4) + ((cypher shr 32) and 0xFFFFL)) xor (v0 + sum) xor ((v0 shr 5) + ((cypher shr 48) and 0xFFFFL))
+            v1 = v1 and 0xFFFFFFFFL
+        }
+        
+        return v0 and 0xFFFFFFFFL
     }
     
     private fun parseUuid128(bytes: ByteArray): String? {
