@@ -133,11 +133,11 @@ class BaseBleService : Service() {
         Log.i(TAG, "Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
         
         // Load output plugin first (needed for publishing)
+        // Note: Output plugin is optional for testing (MQTT needs broker config)
         outputPlugin = pluginRegistry.getOutputPlugin(outputPluginId, applicationContext, outputConfig)
         if (outputPlugin == null) {
-            Log.e(TAG, "Failed to load output plugin: $outputPluginId")
-            updateNotification("Error: Output plugin failed to load")
-            return
+            Log.w(TAG, "Output plugin $outputPluginId not available (may need configuration)")
+            Log.i(TAG, "Continuing without output plugin for BLE testing")
         }
         
         // Load BLE plugin
