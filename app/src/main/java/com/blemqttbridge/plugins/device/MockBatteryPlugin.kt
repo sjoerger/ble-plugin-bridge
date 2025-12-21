@@ -61,7 +61,7 @@ class MockBatteryPlugin : BlePluginInterface {
         Log.i(TAG, "Device disconnected: ${device.address}")
     }
     
-    override suspend fun onCharacteristicNotification(
+    override fun onCharacteristicNotification(
         device: BluetoothDevice,
         characteristicUuid: String,
         value: ByteArray

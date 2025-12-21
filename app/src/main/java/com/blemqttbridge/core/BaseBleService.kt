@@ -493,19 +493,17 @@ class BaseBleService : Service() {
                 BluetoothDevice.TRANSPORT_LE
             )
             connectedDevices[device.address] = Pair(gatt, pluginId)
-
-            // Actively initiate bonding if not already bonded (matches legacy app)
-            if (device.bondState != BluetoothDevice.BOND_BONDED && device.bondState != BluetoothDevice.BOND_BONDING) {
-                Log.i(TAG, "Device not bonded, initiating bonding via createBond()...")
-                val bondInitiated = device.createBond()
-                if (bondInitiated) {
-                    pendingBondDevices.add(device.address)
-                    updateNotification("Pairing in progress...")
-                } else {
-                    Log.e(TAG, "Failed to initiate bonding for ${device.address}")
-                    updateNotification("Pairing failed to start")
-                }
-            }
+            
+            // NOTE: Do NOT call createBond() explicitly here!
+            // The legacy app does not call createBond() - it lets the BLE stack
+            // handle bonding automatically when accessing encrypted characteristics.
+            // Calling createBond() explicitly can cause bond instability and status 133 errors.
+            Log.i(TAG, "Connected GATT - bond state: ${device.bondState} (${when(device.bondState) {
+                BluetoothDevice.BOND_BONDED -> "BONDED"
+                BluetoothDevice.BOND_BONDING -> "BONDING"
+                BluetoothDevice.BOND_NONE -> "NONE"
+                else -> "UNKNOWN"
+            }})")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied for BLE connect", e)
             updateNotification("Error: BLE permission denied")
@@ -632,10 +630,6 @@ class BaseBleService : Service() {
                     Log.i(TAG, "✅ Connected to ${device.address} (plugin: $pluginId)")
                     updateNotification("Connected to ${device.address}")
                     
-                    // EXPERIMENTAL: Skip GATT cache refresh - it may trigger issues
-                    // when combined with cached services being loaded immediately
-                    // refreshGattCache(gatt)
-                    
                     serviceScope.launch {
                         // Get the plugin for this device
                         val plugin = if (pluginId != null) {
@@ -645,37 +639,15 @@ class BaseBleService : Service() {
                         // Notify plugin of connection
                         plugin?.onDeviceConnected(device)
                         
-                        // Check bond state
-                        val bondState = device.bondState
-                        Log.i(TAG, "Bond state after connection: $bondState (${when(bondState) {
-                            BluetoothDevice.BOND_BONDED -> "BONDED"
-                            BluetoothDevice.BOND_BONDING -> "BONDING"
-                            BluetoothDevice.BOND_NONE -> "NONE"
-                            else -> "UNKNOWN"
-                        }})")
+                        // Legacy app behavior: Immediately start service discovery
+                        // The BLE stack will handle bonding/encryption automatically when needed
+                        Log.i(TAG, "Starting service discovery (bond state: ${device.bondState})...")
+                        updateNotification("Connected - Discovering services...")
                         
-                        // BONDING IS REQUIRED for OneControl gateways
-                        // If not bonded, bonding will be initiated in connectToDevice and service discovery will be triggered by bondStateReceiver
-                        if (bondState == BluetoothDevice.BOND_BONDED) {
-                            Log.i(TAG, "✅ Device already bonded - proceeding with service discovery")
-                            updateNotification("Connected - Discovering services...")
-                            
-                            // Skip GATT cache refresh here - it can interfere with discovery
-                            // Let Android use cached services (they're correct)
-                            delay(100)
-                            
-                            try {
-                                gatt.discoverServices()
-                            } catch (e: SecurityException) {
-                                Log.e(TAG, "Permission denied for service discovery", e)
-                            }
-                        } else if (bondState == BluetoothDevice.BOND_BONDING) {
-                            Log.i(TAG, "Bonding in progress, waiting for bond to complete before service discovery...")
-                            updateNotification("Pairing in progress...")
-                            // Service discovery will be triggered by bondStateReceiver
-                        } else {
-                            Log.w(TAG, "Device not bonded and not bonding. Bonding should have been initiated in connectToDevice.")
-                            updateNotification("Waiting for pairing...")
+                        try {
+                            gatt.discoverServices()
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "Permission denied for service discovery", e)
                         }
                         
                         // Publish availability
@@ -697,29 +669,14 @@ class BaseBleService : Service() {
                     }
                     Log.i(TAG, "🔌 Disconnected from ${device.address}: $disconnectReason")
                     
-                    // Handle connection establishment failures (status 62, 133) with retry logic
-                    // These errors often occur on first connection attempt and succeed on retry
-                    val shouldRetry = (status == 62 || status == 133) && 
-                                     device.bondState == BluetoothDevice.BOND_BONDED &&
-                                     pluginId != null
-                    
-                    if (shouldRetry) {
-                        Log.w(TAG, "⚠️ Connection failed with $status - will retry in 5 seconds...")
-                        Log.w(TAG, "   (This is normal on first attempt - encryption needs time to stabilize)")
-                        updateNotification("Connection failed - retrying...")
-                        
-                        gatt.close()
-                        connectedDevices.remove(device.address)
-                        pollingJobs[device.address]?.cancel()
-                        pollingJobs.remove(device.address)
-                        
-                        // Retry after 5 seconds (matches legacy app behavior)
-                        serviceScope.launch {
-                            delay(5000)
-                            Log.i(TAG, "🔄 Retrying connection to ${device.address}...")
-                            connectToDevice(device, pluginId!!)  // Safe because we checked pluginId != null above
-                        }
-                        return
+                    // NOTE: Legacy app does NOT have automatic retry logic
+                    // Status 133 usually means stale bond - user must manually re-pair
+                    // Automatic retries can worsen bond instability
+                    if (status == 133) {
+                        Log.e(TAG, "⚠️ GATT_ERROR(133) - This usually means:")
+                        Log.e(TAG, "   - Stale bond info (gateway forgot the bond)")
+                        Log.e(TAG, "   - Go to Android Settings > Bluetooth > Forget device, then re-pair")
+                        updateNotification("Bond error - please re-pair device")
                     }
                     
                     // If gateway terminated with status 19, it might be a protocol issue
@@ -772,23 +729,14 @@ class BaseBleService : Service() {
                     }
                 }
                 
-                // CRITICAL: Request MTU before plugin setup
-                // The gateway may expect MTU negotiation to complete before accepting notifications
-                // Even if it fails (status 133), the attempt itself may be part of the expected protocol
-                Log.d(TAG, "Requesting MTU 185...")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    gatt.requestMtu(185)
-                }
+                // NOTE: Legacy app does NOT request MTU - skip MTU negotiation
+                // MTU requests can trigger bond instability on some devices
+                // The default MTU (23 bytes) is sufficient for the OneControl protocol
                 
-                // Allow time for MTU negotiation to complete (or fail) before plugin setup
-                // This ensures the BLE stack is fully stabilized:
-                // - MTU negotiation completes (even if unsuccessful)
-                // - Encryption to complete (if link was re-established)
-                // - Internal GATT database to be fully populated
-                // - Any background operations to complete
+                // Brief delay for BLE stack to stabilize after service discovery
                 serviceScope.launch(Dispatchers.Main) {
-                    delay(500)  // 500ms for MTU negotiation + stabilization
-                    Log.d(TAG, "Starting plugin after MTU request + delay...")
+                    delay(100)  // Minimal delay - legacy app starts immediately
+                    Log.d(TAG, "Starting plugin setup...")
                     
                     // Get the plugin for this device
                     val deviceInfo = connectedDevices[gatt.device.address]
@@ -823,6 +771,8 @@ class BaseBleService : Service() {
         }
         
         // New API 33+ callback - called on Android 13+
+        // CRITICAL: Call plugin DIRECTLY on BLE callback thread (like legacy app)
+        // Do NOT use serviceScope.launch - that causes timing/ordering issues
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -830,12 +780,12 @@ class BaseBleService : Service() {
         ) {
             val uuid = characteristic.uuid.toString().lowercase()
             Log.i(TAG, "📨📨📨 onCharacteristicChanged (API33+) CALLED for $uuid: ${value.size} bytes")
-            serviceScope.launch {
-                handleCharacteristicNotification(gatt.device, uuid, value)
-            }
+            // Direct call on BLE thread - matches legacy app behavior
+            handleCharacteristicNotificationDirect(gatt.device, uuid, value)
         }
         
         // Legacy callback for API < 33 (deprecated but still needed for some devices)
+        // CRITICAL: Call plugin DIRECTLY on BLE callback thread (like legacy app)
         @Deprecated("Deprecated in API 33")
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
@@ -846,9 +796,8 @@ class BaseBleService : Service() {
             @Suppress("DEPRECATION")
             val value = characteristic.value ?: byteArrayOf()
             Log.i(TAG, "📨📨📨 onCharacteristicChanged (legacy) CALLED for $uuid: ${value.size} bytes")
-            serviceScope.launch {
-                handleCharacteristicNotification(gatt.device, uuid, value)
-            }
+            // Direct call on BLE thread - matches legacy app behavior
+            handleCharacteristicNotificationDirect(gatt.device, uuid, value)
         }
         
         // Legacy callback for API < 33
@@ -940,25 +889,32 @@ class BaseBleService : Service() {
 
     /**
      * Handle characteristic notification from BLE device.
+     * CRITICAL: Called DIRECTLY on BLE callback thread (not via coroutine) to match legacy app behavior.
+     * Plugin receives notification immediately, can queue work for background processing.
      */
-    private suspend fun handleCharacteristicNotification(
+    private fun handleCharacteristicNotificationDirect(
         device: BluetoothDevice,
         characteristicUuid: String,
         value: ByteArray
     ) {
-        val output = outputPlugin ?: return
-        
         // Get the plugin for this device
         val deviceInfo = connectedDevices[device.address]
         val pluginId = deviceInfo?.second ?: return
         val plugin = pluginRegistry.getLoadedBlePlugin(pluginId) ?: return
         
         try {
+            // Call plugin directly on BLE thread (like legacy app)
             val stateUpdates = plugin.onCharacteristicNotification(device, characteristicUuid, value)
             
-            for ((topicSuffix, payload) in stateUpdates) {
-                val deviceId = plugin.getDeviceId(device)
-                output.publishState("device/$deviceId/$topicSuffix", payload, retained = true)
+            // Publish state updates asynchronously (MQTT publishing can be async)
+            if (stateUpdates.isNotEmpty()) {
+                val output = outputPlugin ?: return
+                serviceScope.launch {
+                    for ((topicSuffix, payload) in stateUpdates) {
+                        val deviceId = plugin.getDeviceId(device)
+                        output.publishState("device/$deviceId/$topicSuffix", payload, retained = true)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling notification", e)

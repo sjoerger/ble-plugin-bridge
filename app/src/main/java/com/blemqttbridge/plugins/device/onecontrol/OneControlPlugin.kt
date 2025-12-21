@@ -149,6 +149,7 @@ class OneControlPlugin : BlePluginInterface {
     private val cobsDecoderStates = mutableMapOf<String, CobsDecoderState>()
     
     private var gattOperations: BlePluginInterface.GattOperations? = null
+    private var currentDevice: BluetoothDevice? = null  // Store device for callbacks
     private var pendingSeedResponse: CompletableDeferred<ByteArray>? = null
     
     override fun getPluginId(): String = PLUGIN_ID
@@ -215,6 +216,7 @@ class OneControlPlugin : BlePluginInterface {
         gattOperations: BlePluginInterface.GattOperations
     ): Result<Unit> {
         this.gattOperations = gattOperations
+        this.currentDevice = device  // Store device for callbacks
         
         // Clear discovered devices to allow discovery republishing on each connection
         // This ensures Home Assistant gets discovery payloads even after HA/MQTT restart
@@ -336,13 +338,23 @@ class OneControlPlugin : BlePluginInterface {
                 }
                 
                 // STEP 6: Enable notifications (MUST be after KEY write!)
-                // CRITICAL: Original app subscribes to THREE characteristics for Data Service gateways:
-                // 1. 00000034 (DATA_READ) - Main data stream
+                // CRITICAL: Original app subscribes in THIS ORDER for Data Service gateways:
+                // 1. 00000034 (DATA_READ) - Main data stream FIRST
                 // 2. 00000011 (SEED) - Auth Service notifications
                 // 3. 00000014 (Auth Service) - Additional auth notifications
                 
                 Log.i(TAG, "📝 Enabling notifications (all 3 characteristics)...")
                 delay(200)  // Wait for gateway to enter data mode (from technical_spec.md)
+                
+                // Subscribe to Data Service READ (00000034) - FIRST like legacy app
+                val notifyResult = gattOperations.enableNotifications(Constants.DATA_READ_CHAR_UUID)
+                if (notifyResult.isFailure) {
+                    Log.w(TAG, "⚠️ Failed to subscribe to DATA (00000034): ${notifyResult.exceptionOrNull()?.message}")
+                    // Continue anyway - may still work
+                } else {
+                    Log.i(TAG, "✅ Subscribed to DATA (00000034) notifications")
+                }
+                delay(150)  // Small delay between subscriptions (from original app)
                 
                 // Subscribe to Auth Service SEED (00000011)
                 val seedNotifyResult = gattOperations.enableNotifications(Constants.SEED_CHAR_UUID)
@@ -351,7 +363,7 @@ class OneControlPlugin : BlePluginInterface {
                 } else {
                     Log.i(TAG, "✅ Subscribed to SEED (00000011) notifications")
                 }
-                delay(150)  // Small delay between subscriptions (from original app)
+                delay(150)  // Small delay between subscriptions
                 
                 // Subscribe to Auth Service 00000014
                 val auth14NotifyResult = gattOperations.enableNotifications(Constants.AUTH_STATUS_CHAR_UUID)
@@ -360,29 +372,23 @@ class OneControlPlugin : BlePluginInterface {
                 } else {
                     Log.i(TAG, "✅ Subscribed to Auth (00000014) notifications")
                 }
-                delay(150)  // Small delay between subscriptions
-                
-                // Subscribe to Data Service READ (00000034) - main data stream
-                val notifyResult = gattOperations.enableNotifications(Constants.DATA_READ_CHAR_UUID)
-                if (notifyResult.isFailure) {
-                    Log.w(TAG, "⚠️ Failed to subscribe to DATA (00000034): ${notifyResult.exceptionOrNull()?.message}")
-                    // Continue anyway - may still work
-                } else {
-                    Log.i(TAG, "✅ Subscribed to DATA (00000034) notifications")
-                }
                 
                 // Start stream reader
                 startActiveStreamReading(device)
                 
-                // Send initial GetDevices command after brief delay
+                // CRITICAL: CAN-based Data Service gateways need an initial GetDevices command
+                // to "wake up" and start sending data (including GatewayInformation event).
+                // Per legacy app (android_ble_bridge line 1349): "CAN-based gateways need an 
+                // initial command to 'wake up' and start sending data".
+                // Send GetDevices to trigger GatewayInformation and data flow.
+                // Once GatewayInformation arrives, heartbeat will be started from onGatewayInfoReceived().
                 GlobalScope.launch {
-                    delay(500)
-                    Log.i(TAG, "📤 Sending initial GetDevices to wake up gateway")
+                    delay(500)  // Small delay to ensure stream reader is ready
+                    Log.i(TAG, "📤 Sending initial GetDevices to wake up CAN-based Data Service gateway")
                     sendInitialCanCommand(device)
-                    startHeartbeat(device)
                 }
                 
-                Log.i(TAG, "✅ Data Service gateway ready!")
+                Log.i(TAG, "✅ Data Service gateway connected - waiting for GatewayInformation...")
                 return Result.success(Unit)
             } else {
                 // CAN Service gateway - perform full PIN unlock + TEA authentication
@@ -534,10 +540,11 @@ class OneControlPlugin : BlePluginInterface {
         authenticatedDevices.remove(device.address)
         unlockedDevices.remove(device.address)
         gattOperations = null
+        currentDevice = null
         pendingSeedResponse = null
     }
     
-    override suspend fun onCharacteristicNotification(
+    override fun onCharacteristicNotification(
         device: BluetoothDevice,
         characteristicUuid: String,
         value: ByteArray
@@ -1103,19 +1110,26 @@ class OneControlPlugin : BlePluginInterface {
     
     /**
      * Handle first GatewayInformation response (like original app)
+     * CRITICAL: This is when we START sending commands (not immediately after connection!)
      */
     private fun onGatewayInfoReceived(deviceAddress: String) {
-        Log.i(TAG, "🏗️ Gateway information received - protocol fully established")
+        Log.i(TAG, "✅ GatewayInformation received - protocol fully established for $deviceAddress")
+        
+        val device = currentDevice
+        if (device == null) {
+            Log.e(TAG, "❌ Cannot send commands: device reference is null")
+            return
+        }
         
         // Send GetDevices with correct table ID (like original app)
-        kotlinx.coroutines.GlobalScope.launch {
-            kotlinx.coroutines.delay(500)
-            Log.i(TAG, "📤 Sending GetDevices with updated DeviceTableId: 0x${deviceTableId.toString(16).padStart(2, '0')}")
-            // Find the device object for this address
-            // For now, just log that we would send it
+        GlobalScope.launch {
+            delay(500)
+            Log.i(TAG, "📤 Sending GetDevices after GatewayInfo (DeviceTableId=0x${deviceTableId.toString(16).padStart(2, '0')})")
+            sendInitialCanCommand(device)
         }
 
-        // Heartbeat is already running - no need to restart (like original app)
+        // Start heartbeat now that gateway is ready
+        startHeartbeat(device)
     }
     
     /**

@@ -88,7 +88,9 @@ interface BlePluginInterface {
     
     /**
      * Called when a GATT characteristic notification is received.
+     * CRITICAL: This is called DIRECTLY on the BLE callback thread for immediate processing.
      * Plugin parses the data and returns state updates for MQTT publishing.
+     * Do NOT perform blocking operations here - queue work for background processing if needed.
      * 
      * @param device The Bluetooth device that sent the notification
      * @param characteristicUuid UUID of the characteristic that sent the notification
@@ -96,7 +98,7 @@ interface BlePluginInterface {
      * @return Map of topic suffix to payload (e.g., "state" -> JSON string)
      *         Returns empty map if notification should be ignored
      */
-    suspend fun onCharacteristicNotification(
+    fun onCharacteristicNotification(
         device: BluetoothDevice,
         characteristicUuid: String,
         value: ByteArray
