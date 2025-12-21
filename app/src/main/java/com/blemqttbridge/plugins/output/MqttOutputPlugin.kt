@@ -75,7 +75,7 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 isCleanSession = true  // Use clean sessions to avoid persistence issues
                 connectionTimeout = 30
                 keepAliveInterval = 120  // Increased to 2 minutes to prevent keep-alive timeouts
-                maxInflight = 10
+                maxInflight = 100  // Increased to handle initial discovery burst
                 
                 if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
                     userName = username

@@ -11,7 +11,11 @@ import com.blemqttbridge.plugins.device.onecontrol.protocol.RelayBasicLatchingSt
 import com.blemqttbridge.plugins.device.onecontrol.protocol.RelayHBridgeStatusEvent
 import com.blemqttbridge.plugins.device.onecontrol.protocol.RvStatusEvent
 import com.blemqttbridge.plugins.device.onecontrol.protocol.DeviceOnlineStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.TankSensorStatusEvent
+import com.blemqttbridge.plugins.device.onecontrol.protocol.TankSensorStatusV2Event
+import com.blemqttbridge.plugins.device.onecontrol.protocol.HvacStatusEvent
 import com.blemqttbridge.plugins.device.onecontrol.protocol.MyRvLinkCommandEncoder
+import com.blemqttbridge.plugins.device.onecontrol.protocol.MyRvLinkEventFactory
 import com.blemqttbridge.plugins.device.onecontrol.protocol.MyRvLinkEventType
 import kotlinx.coroutines.*
 
@@ -29,6 +33,7 @@ class OneControlPlugin : BlePluginInterface {
     
     // State listener for MQTT output (set via setStateListener)
     private var stateListener: OneControlStateListener? = null
+    private var mqttFormatter: OneControlMqttFormatter? = null
     
     // Coroutine scope for emitting state updates asynchronously
     private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -122,7 +127,10 @@ class OneControlPlugin : BlePluginInterface {
     
     // Gateway type tracking (Data Service vs CAN Service)
     // Data Service gateways require 2-byte header stripping on decoded frames
-    private val dataServiceGateways = mutableSetOf<String>()        
+    private val dataServiceGateways = mutableSetOf<String>()
+    
+    // Discovery tracking (like legacy app)
+    private val haDiscoveryPublished = mutableSetOf<String>()        
     
     // Protocol state tracking
     private var nextCommandId: UShort = 1u
@@ -207,6 +215,16 @@ class OneControlPlugin : BlePluginInterface {
         gattOperations: BlePluginInterface.GattOperations
     ): Result<Unit> {
         this.gattOperations = gattOperations
+        
+        // Clear discovered devices to allow discovery republishing on each connection
+        // This ensures Home Assistant gets discovery payloads even after HA/MQTT restart
+        discoveredDevices.clear()
+        
+        // CRITICAL: 1.5s stabilization delay after service discovery
+        // Without this, we get "already has a pending command" errors
+        // See: context/session_summary_jan2025.md - "1.5s stabilization delay after service discovery"
+        Log.i(TAG, "⏳ Waiting 1.5s for GATT stabilization...")
+        kotlinx.coroutines.delay(1500)
         
         Log.i(TAG, "🔐 Starting authentication for ${device.address}...")
         
@@ -599,34 +617,10 @@ class OneControlPlugin : BlePluginInterface {
     }
     
     override suspend fun getDiscoveryPayloads(device: BluetoothDevice): Map<String, String> {
-        val payloads = mutableMapOf<String, String>()
-        
-        // Generate basic status sensor
-        val deviceId = getDeviceId(device)
-        val topic = "homeassistant/binary_sensor/${deviceId}_status/config"
-        val payload = """
-            {
-                "name": "OneControl Gateway Status",
-                "unique_id": "${deviceId}_status",
-                "state_topic": "onecontrol/${device.address}/status",
-                "device_class": "connectivity",
-                "payload_on": "online",
-                "payload_off": "offline",
-                "device": {
-                    "identifiers": ["onecontrol_$deviceId"],
-                    "name": "OneControl Gateway",
-                    "manufacturer": "Lippert Components",
-                    "model": "OneControl",
-                    "sw_version": "$PLUGIN_VERSION"
-                }
-            }
-        """.trimIndent()
-        
-        payloads[topic] = payload
-        
-        Log.i(TAG, "📡 Generated ${payloads.size} discovery payload(s)")
-        
-        return payloads
+        // Discovery is now handled by OneControlMqttFormatter to avoid duplicate devices
+        // The formatter creates a single unified device with all entities
+        Log.d(TAG, "Discovery handled by OneControlMqttFormatter")
+        return emptyMap()
     }
     
     override fun getPollingIntervalMs(): Long? {
@@ -767,44 +761,101 @@ class OneControlPlugin : BlePluginInterface {
     /**
      * Process completed COBS-decoded frame (like original app)
      * Parses event types and emits state updates via listener.
+     * 
+     * Frame formats:
+     * - Events: [EventType (1 byte)][Event data...]
+     * - Command Responses: [ClientCommandId (2 bytes LE)][CommandType (1 byte)][Response data...]
      */
     private fun processDecodedFrame(deviceAddress: String, frame: ByteArray) {
         Log.d(TAG, "📥 Processing decoded frame: ${frame.size} bytes - ${frame.toHexString()}")
 
+        if (frame.isEmpty()) return
+
         // Data Service gateways may have a 2-byte header that needs stripping
-        // Try decoding without stripping first, then with stripping if that fails
         var eventData = frame
         val isDataServiceGateway = dataServiceGateways.contains(deviceAddress)
+        var triedStripping = false
         
-        if (isDataServiceGateway && frame.size >= 5) {
-            // For Data Service gateways: try decoding without stripping first
-            // If the event type looks invalid, try stripping 2-byte header
-            val maybeEventType = frame.getOrNull(2) ?: 0
-            val knownEventTypes = setOf(
-                MyRvLinkEventType.GatewayInformation,
-                MyRvLinkEventType.RvStatus,
-                MyRvLinkEventType.DimmableLightStatus,
-                MyRvLinkEventType.RelayBasicLatchingStatusType2,
-                MyRvLinkEventType.RelayHBridgeMomentaryStatusType2,
-                MyRvLinkEventType.DeviceOnlineStatus,
-                MyRvLinkEventType.TankSensorStatus
-            )
-            
-            if (!knownEventTypes.contains(maybeEventType)) {
-                // Unknown event type - try stripping 2-byte header
+        // Try to decode as event first (like legacy app)
+        // Events have format: [EventType (1 byte)][Data...]
+        val knownEventTypes = setOf(
+            MyRvLinkEventType.GatewayInformation,
+            MyRvLinkEventType.DeviceCommand,
+            MyRvLinkEventType.DeviceOnlineStatus,
+            MyRvLinkEventType.DeviceLockStatus,
+            MyRvLinkEventType.RelayBasicLatchingStatusType1,
+            MyRvLinkEventType.RelayBasicLatchingStatusType2,
+            MyRvLinkEventType.RvStatus,
+            MyRvLinkEventType.DimmableLightStatus,
+            MyRvLinkEventType.RgbLightStatus,
+            MyRvLinkEventType.GeneratorGenieStatus,
+            MyRvLinkEventType.HvacStatus,
+            MyRvLinkEventType.TankSensorStatus,
+            MyRvLinkEventType.RelayHBridgeMomentaryStatusType1,
+            MyRvLinkEventType.RelayHBridgeMomentaryStatusType2,
+            MyRvLinkEventType.TankSensorStatusV2,
+            MyRvLinkEventType.RealTimeClock
+        )
+        
+        // First check if byte[0] is a known event type
+        var maybeEventType = eventData.getOrNull(0) ?: 0
+        var isEvent = knownEventTypes.contains(maybeEventType)
+        
+        // For Data Service gateways, if first decode fails, try with 2-byte header stripped
+        if (isDataServiceGateway && !isEvent && !MyRvLinkEventFactory.isCommandResponse(eventData)) {
+            if (frame.size >= 3) {
                 val headerHex = String.format("%02X %02X", frame[0].toInt() and 0xFF, frame[1].toInt() and 0xFF)
                 eventData = frame.sliceArray(2 until frame.size)
-                Log.d(TAG, "🔍 Data Service: Trying with 2-byte header stripped (0x$headerHex)")
+                triedStripping = true
+                Log.d(TAG, "🔍 Data Service: First decode failed, trying with 2-byte header stripped (0x$headerHex)")
+                
+                // Try again with stripped data
+                maybeEventType = eventData.getOrNull(0) ?: 0
+                isEvent = knownEventTypes.contains(maybeEventType)
             }
         }
         
-        // Event decoding: expect [ClientCommandIdLo][ClientCommandIdHi][EventType][...]
-        if (eventData.size < 3) {
-            Log.w(TAG, "Frame too short for event decoding: ${frame.toHexString()}")
+        // Process as event if byte[0] is a known event type
+        if (isEvent) {
+            val eventType = maybeEventType
+            if (triedStripping) {
+                Log.d(TAG, "✅ Decoded as event (with header stripped): 0x${eventType.toUByte().toString(16)}")
+            } else {
+                Log.d(TAG, "✅ Decoded as event (no stripping): 0x${eventType.toUByte().toString(16)}")
+            }
+            processEvent(deviceAddress, eventType, eventData)
+            return
+        }
+        
+        // Otherwise check for command response
+        // Command responses have format: [ClientCommandId (2 bytes LE)][CommandType (1 byte)][Data...]
+        // Valid command types: 0x01 (GetDevices), 0x02 (GetDevicesMetadata)
+        if (MyRvLinkEventFactory.isCommandResponse(eventData)) {
+            val commandId = ((eventData[1].toInt() and 0xFF) shl 8) or (eventData[0].toInt() and 0xFF)
+            val commandType = eventData[2].toInt() and 0xFF
+            Log.i(TAG, "📦 Command Response: CommandId=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}, size=${eventData.size} bytes")
+            
+            when (commandType) {
+                0x01 -> handleGetDevicesResponse(deviceAddress, eventData)      // GetDevices
+                0x02 -> handleGetDevicesMetadataResponse(deviceAddress, eventData)  // GetDevicesMetadata
+            }
             return
         }
 
-        val eventType = eventData[2]
+        // Not a recognized event or command response - log for debugging
+        Log.w(TAG, "⚠️ Unknown frame format: ${eventData.toHexString()}")
+        if (triedStripping) {
+            Log.w(TAG, "⚠️ Tried both with and without header stripping - both failed")
+        }
+        Log.w(TAG, "⚠️ First byte: 0x${(eventData.getOrNull(0)?.toInt()?.and(0xFF) ?: 0).toString(16)}")
+    }
+
+    /**
+     * Process a decoded MyRvLink event
+     */
+    private fun processEvent(deviceAddress: String, eventType: Byte, eventData: ByteArray) {
+        Log.i(TAG, "📦 Processing EventType=0x${eventType.toUByte().toString(16).padStart(2, '0')} from ${deviceAddress}")
+        
         // Lazy init state tracker (per device if needed)
         if (deviceStateTracker == null) {
             deviceStateTracker = com.blemqttbridge.plugins.device.onecontrol.protocol.DeviceStateTracker()
@@ -844,15 +895,57 @@ class OneControlPlugin : BlePluginInterface {
             
             MyRvLinkEventType.DimmableLightStatus -> {
                 val event = DimmableLightStatusEvent.decode(frame)
-                event?.let {
-                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
-                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                if (event == null) {
+                    Log.w(TAG, "⚠️ DimmableLightStatus decode failed, frame: ${frame.toHexString()}")
+                } else {
+                    val tableId = ((event.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (event.deviceAddress and 0xFF).toByte()
+                    Log.i(TAG, "💡 DimmableLight event: table=$tableId, device=$deviceId, isOn=${event.isOn}, brightness=${event.brightness}")
+                    
+                    // Publish HA discovery (like legacy app - directly in handler)
+                    val keyHex = "%02x%02x".format(tableId.toUByte().toInt(), deviceId.toUByte().toInt())
+                    val discoveryKey = "light_$keyHex"
+                    val isNewDevice = !haDiscoveryPublished.contains(discoveryKey)
+                    Log.d(TAG, "🔍 Discovery check: key=$discoveryKey, mqttFormatter=${mqttFormatter != null}, isNewDevice=$isNewDevice")
+                    if (isNewDevice) {
+                        haDiscoveryPublished.add(discoveryKey)
+                        Log.i(TAG, "📢 Publishing discovery for DimmableLight $tableId:$deviceId")
+                        val update = OneControlStateUpdate.DimmableLight(
+                            tableId = tableId,
+                            deviceId = deviceId,
+                            isOn = event.isOn,
+                            brightnessRaw = (event.brightness * 255) / 100,
+                            brightnessPct = event.brightness
+                        )
+                        pluginScope.launch {
+                            Log.d(TAG, "🚀 Launching discovery publish coroutine")
+                            mqttFormatter?.publishDimmableLightDiscovery(update)
+                                ?: Log.w(TAG, "⚠️ mqttFormatter is NULL - cannot publish discovery!")
+                        }
+                    }
+                    
+                    // Publish state
                     emitStateUpdate(deviceAddress, OneControlStateUpdate.DimmableLight(
                         tableId = tableId,
                         deviceId = deviceId,
-                        isOn = it.isOn,
-                        brightnessRaw = (it.brightness * 255) / 100,  // Convert from 0-100 to 0-255
-                        brightnessPct = it.brightness
+                        isOn = event.isOn,
+                        brightnessRaw = (event.brightness * 255) / 100,
+                        brightnessPct = event.brightness
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.RelayBasicLatchingStatusType1 -> {
+                // Type1 and Type2 have same parsing structure for our purposes
+                val event = RelayBasicLatchingStatusEvent.decode(frame)
+                event?.let {
+                    val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
+                    val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    Log.i(TAG, "🔌 RelayType1 event: table=$tableId, device=$deviceId, isOn=${it.isOn}")
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.Switch(
+                        tableId = tableId,
+                        deviceId = deviceId,
+                        isOn = it.isOn
                     ))
                 }
             }
@@ -862,6 +955,7 @@ class OneControlPlugin : BlePluginInterface {
                 event?.let {
                     val tableId = ((it.deviceAddress shr 8) and 0xFF).toByte()
                     val deviceId = (it.deviceAddress and 0xFF).toByte()
+                    Log.i(TAG, "🔌 RelayType2 event: table=$tableId, device=$deviceId, isOn=${it.isOn}")
                     emitStateUpdate(deviceAddress, OneControlStateUpdate.Switch(
                         tableId = tableId,
                         deviceId = deviceId,
@@ -900,6 +994,58 @@ class OneControlPlugin : BlePluginInterface {
                 }
             }
             
+            MyRvLinkEventType.TankSensorStatus -> {
+                val event = TankSensorStatusEvent.decode(frame)
+                event?.let { tankEvent ->
+                    // This event contains multiple tanks, emit update for each
+                    tankEvent.tanks.forEach { tank ->
+                        Log.i(TAG, "💧 Tank event: table=${tankEvent.deviceTableId}, device=${tank.deviceId}, level=${tank.percent}%")
+                        emitStateUpdate(deviceAddress, OneControlStateUpdate.Tank(
+                            tableId = tankEvent.deviceTableId,
+                            deviceId = tank.deviceId,
+                            level = tank.percent,
+                            fluidType = null  // Type not provided in this event
+                        ))
+                    }
+                }
+            }
+            
+            MyRvLinkEventType.TankSensorStatusV2 -> {
+                val event = TankSensorStatusV2Event.decode(frame)
+                event?.let {
+                    // Only emit if we have a valid percent value
+                    val level = it.percent ?: return@let
+                    Log.i(TAG, "💧 TankV2 event: table=${it.deviceTableId}, device=${it.deviceId}, level=$level%")
+                    emitStateUpdate(deviceAddress, OneControlStateUpdate.Tank(
+                        tableId = it.deviceTableId,
+                        deviceId = it.deviceId,
+                        level = level,
+                        fluidType = null  // Type not provided in V2 event either
+                    ))
+                }
+            }
+            
+            MyRvLinkEventType.HvacStatus -> {
+                val event = HvacStatusEvent.decode(frame)
+                event?.let { hvacEvent ->
+                    // This event contains multiple HVAC zones, emit update for each
+                    hvacEvent.zones.forEach { zone ->
+                        emitStateUpdate(deviceAddress, OneControlStateUpdate.Hvac(
+                            tableId = hvacEvent.deviceTableId,
+                            deviceId = zone.deviceId,
+                            heatMode = zone.heatMode,
+                            heatSource = zone.heatSource,
+                            fanMode = zone.fanMode,
+                            zoneMode = zone.zoneMode,
+                            heatSetpointF = zone.lowTripTempF,
+                            coolSetpointF = zone.highTripTempF,
+                            indoorTempF = zone.indoorTempF,
+                            outdoorTempF = zone.outdoorTempF
+                        ))
+                    }
+                }
+            }
+            
             else -> {
                 Log.d(TAG, "❓ Unhandled event type: 0x${eventType.toUByte().toString(16)}")
             }
@@ -913,6 +1059,8 @@ class OneControlPlugin : BlePluginInterface {
     private fun emitStateUpdate(gatewayAddress: String, update: OneControlStateUpdate) {
         val deviceKey = (update.tableId.toInt() shl 8) or (update.deviceId.toInt() and 0xFF)
         val isNewDevice = discoveredDevices.add(deviceKey)
+        
+        Log.i(TAG, "🔄 emitStateUpdate called: type=${update::class.simpleName}, deviceKey=$deviceKey, isNewDevice=$isNewDevice, stateListener=${stateListener != null}")
         
         pluginScope.launch {
             if (isNewDevice) {
@@ -928,6 +1076,8 @@ class OneControlPlugin : BlePluginInterface {
      */
     fun setStateListener(listener: OneControlStateListener?) {
         stateListener = listener
+        // Also store mqttFormatter reference for direct discovery calls
+        mqttFormatter = listener as? OneControlMqttFormatter
     }
     
     /**
@@ -968,6 +1118,183 @@ class OneControlPlugin : BlePluginInterface {
         // Heartbeat is already running - no need to restart (like original app)
     }
     
+    /**
+     * Handle GetDevices command response
+     * This response contains all device definitions from the gateway.
+     * Format: [ClientCommandId (2 LE)][CommandType=0x01][DeviceTableId][StartDeviceId][DeviceCount][Device entries...]
+     */
+    private fun handleGetDevicesResponse(deviceAddress: String, data: ByteArray) {
+        if (data.size < 6) {
+            Log.w(TAG, "GetDevices response too short: ${data.size} bytes")
+            return
+        }
+        
+        // Skip command header (3 bytes: 2 for commandId, 1 for commandType)
+        val extended = data.copyOfRange(3, data.size)
+        if (extended.size < 3) {
+            Log.w(TAG, "GetDevices extended data too short: ${extended.size} bytes")
+            return
+        }
+        
+        val tableId = extended[0]
+        val startDeviceId = extended[1].toInt() and 0xFF
+        val deviceCount = extended[2].toInt() and 0xFF
+        
+        // Update DeviceTableId if we didn't have one yet
+        if (deviceTableId == 0x00.toByte() && tableId != 0x00.toByte()) {
+            deviceTableId = tableId
+            Log.i(TAG, "✅ Updated DeviceTableId from GetDevices response: 0x${deviceTableId.toString(16)}")
+        }
+        
+        var offset = 3
+        var index = 0
+        Log.i(TAG, "📋 GetDevices: tableId=0x${tableId.toString(16)}, startId=$startDeviceId, count=$deviceCount, extLen=${extended.size}")
+        
+        while (index < deviceCount && offset + 2 <= extended.size) {
+            val protocol = extended[offset].toInt() and 0xFF
+            val payloadSize = extended[offset + 1].toInt() and 0xFF
+            val entrySize = payloadSize + 2
+            if (offset + entrySize > extended.size) {
+                Log.w(TAG, "GetDevices entry truncated at index=$index, offset=$offset, payloadSize=$payloadSize, extLen=${extended.size}")
+                break
+            }
+            
+            val deviceId = ((startDeviceId + index) and 0xFF).toByte()
+            
+            if (protocol == 2 && payloadSize == 10) {
+                // IdsCan physical device
+                val base = offset
+                val deviceType = extended[base + 2].toInt() and 0xFF
+                val deviceInstance = extended[base + 3].toInt() and 0xFF
+                val productId = ((extended[base + 5].toInt() and 0xFF) shl 8) or (extended[base + 4].toInt() and 0xFF)
+                val macBytes = extended.copyOfRange(base + 6, base + 12)
+                val macStr = macBytes.joinToString(":") { "%02X".format(it) }
+                
+                Log.i(TAG, "📋 Device[${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}]: proto=$protocol, type=0x${deviceType.toString(16)}, instance=$deviceInstance, productId=0x${productId.toString(16)}, mac=$macStr")
+                
+                // Emit discovery for this device based on its type
+                emitDeviceDiscoveryFromDefinition(deviceAddress, tableId, deviceId, deviceType, deviceInstance)
+            } else if (protocol == 1) {
+                // Virtual device - still emit discovery
+                Log.i(TAG, "📋 Device[${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}]: proto=$protocol (virtual), payloadSize=$payloadSize")
+                // Virtual devices might not have deviceType in the same format
+            } else {
+                Log.i(TAG, "📋 Device entry index=$index uses protocol=$protocol, payloadSize=$payloadSize")
+            }
+            
+            offset += entrySize
+            index++
+        }
+        
+        if (index != deviceCount) {
+            Log.w(TAG, "GetDevices decoded $index devices, expected $deviceCount")
+        } else {
+            Log.i(TAG, "✅ GetDevices: Successfully parsed $deviceCount device definitions")
+        }
+    }
+    
+    /**
+     * Handle GetDevicesMetadata command response
+     * Contains device names and other metadata
+     */
+    private fun handleGetDevicesMetadataResponse(deviceAddress: String, data: ByteArray) {
+        if (data.size < 6) {
+            Log.w(TAG, "GetDevicesMetadata response too short: ${data.size} bytes")
+            return
+        }
+        
+        val extended = data.copyOfRange(3, data.size)
+        if (extended.size < 3) {
+            Log.w(TAG, "GetDevicesMetadata extended data too short: ${extended.size} bytes")
+            return
+        }
+        
+        val tableId = extended[0]
+        val startDeviceId = extended[1].toInt() and 0xFF
+        val deviceCount = extended[2].toInt() and 0xFF
+        
+        Log.i(TAG, "📋 GetDevicesMetadata: tableId=0x${tableId.toString(16)}, startId=$startDeviceId, count=$deviceCount")
+        // TODO: Parse metadata entries and update device names
+    }
+    
+    /**
+     * Emit device discovery based on device type from GetDevices response
+     * Maps IdsCan device types to our state update types for discovery
+     */
+    private fun emitDeviceDiscoveryFromDefinition(
+        deviceAddress: String,
+        tableId: Byte,
+        deviceId: Byte,
+        deviceType: Int,
+        deviceInstance: Int
+    ) {
+        // Map IdsCan device types to our known types
+        // These mappings are based on the protocol documentation and legacy app behavior
+        when (deviceType) {
+            0x08 -> {
+                // DimmableLight (type 8)
+                Log.i(TAG, "💡 Discovered DimmableLight from GetDevices: ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+                emitStateUpdate(deviceAddress, OneControlStateUpdate.DimmableLight(
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    isOn = false,  // Unknown initial state
+                    brightnessRaw = 0,
+                    brightnessPct = 0
+                ))
+            }
+            0x06 -> {
+                // Relay/Switch (type 6)
+                Log.i(TAG, "🔌 Discovered Switch from GetDevices: ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+                emitStateUpdate(deviceAddress, OneControlStateUpdate.Switch(
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    isOn = false  // Unknown initial state
+                ))
+            }
+            0x0E -> {
+                // H-Bridge/Cover (type 14)
+                Log.i(TAG, "🪟 Discovered Cover from GetDevices: ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+                emitStateUpdate(deviceAddress, OneControlStateUpdate.Cover(
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    status = 0xC0,  // Default: stopped
+                    position = null,
+                    lastDirection = null
+                ))
+            }
+            0x0C -> {
+                // Tank Sensor (type 12)
+                Log.i(TAG, "💧 Discovered Tank from GetDevices: ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+                emitStateUpdate(deviceAddress, OneControlStateUpdate.Tank(
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    level = 0,  // Unknown initial level
+                    fluidType = null
+                ))
+            }
+            0x0B -> {
+                // HVAC (type 11)
+                Log.i(TAG, "🌡️ Discovered HVAC from GetDevices: ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+                emitStateUpdate(deviceAddress, OneControlStateUpdate.Hvac(
+                    tableId = tableId,
+                    deviceId = deviceId,
+                    heatMode = 0,
+                    heatSource = 0,
+                    fanMode = 0,
+                    zoneMode = 0,
+                    heatSetpointF = 70,  // Default setpoints
+                    coolSetpointF = 75,
+                    indoorTempF = null,
+                    outdoorTempF = null
+                ))
+            }
+            else -> {
+                // Unknown device type - log for debugging
+                Log.d(TAG, "❓ Unknown device type 0x${deviceType.toString(16)} for ${tableId.toInt() and 0xFF}:${deviceId.toInt() and 0xFF}")
+            }
+        }
+    }
+
     /**
      * Send initial MyRvLink GetDevices command to "wake up" the gateway
      * This is what the official app sends to establish communication

@@ -584,9 +584,52 @@ class BaseBleService : Service() {
             val deviceInfo = connectedDevices[device.address]
             val pluginId = deviceInfo?.second
             
+            // Log the full status for debugging bond/connection issues
+            val statusName = when (status) {
+                BluetoothGatt.GATT_SUCCESS -> "GATT_SUCCESS"
+                133 -> "GATT_ERROR(133) - likely stale bond/link key mismatch"
+                8 -> "GATT_CONN_TIMEOUT"
+                19 -> "GATT_CONN_TERMINATE_PEER_USER"
+                22 -> "GATT_CONN_TERMINATE_LOCAL_HOST"
+                34 -> "GATT_CONN_LMP_TIMEOUT"
+                62 -> "GATT_CONN_FAIL_ESTABLISH"
+                else -> "UNKNOWN($status)"
+            }
+            val stateName = when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+                BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+                BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+                BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+                else -> "UNKNOWN($newState)"
+            }
+            Log.i(TAG, "🔗 onConnectionStateChange: ${device.address} status=$statusName, newState=$stateName")
+            
+            // CRITICAL: Handle stale bond detection (status 133 with BOND_BONDED)
+            // This happens when Android thinks it's bonded but the gateway has forgotten the bond
+            if (status == 133 && device.bondState == BluetoothDevice.BOND_BONDED) {
+                Log.e(TAG, "⚠️ STALE BOND DETECTED for ${device.address}!")
+                Log.e(TAG, "   Android reports BOND_BONDED but connection failed with status 133")
+                Log.e(TAG, "   This means the gateway has forgotten the bond - user must re-pair manually")
+                Log.e(TAG, "   Go to Android Settings > Bluetooth > Forget device, then re-pair")
+                updateNotification("Bond invalid - please re-pair device")
+                
+                // Clean up this connection attempt
+                connectedDevices.remove(device.address)
+                gatt.close()
+                return
+            }
+            
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "Connected to ${device.address} (plugin: $pluginId)")
+                    // Only proceed if status is success
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        Log.e(TAG, "❌ Connected but with error status: $statusName - closing connection")
+                        gatt.close()
+                        connectedDevices.remove(device.address)
+                        return
+                    }
+                    
+                    Log.i(TAG, "✅ Connected to ${device.address} (plugin: $pluginId)")
                     updateNotification("Connected to ${device.address}")
                     
                     // EXPERIMENTAL: Skip GATT cache refresh - it may trigger issues
@@ -641,8 +684,53 @@ class BaseBleService : Service() {
                 }
                 
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "Disconnected from ${device.address}")
-                    updateNotification("Disconnected")
+                    // Log disconnect reason for debugging
+                    val disconnectReason = when (status) {
+                        BluetoothGatt.GATT_SUCCESS -> "normal disconnect"
+                        8 -> "GATT_CONN_TIMEOUT - connection timed out"
+                        19 -> "GATT_CONN_TERMINATE_PEER_USER - gateway terminated connection"
+                        22 -> "GATT_CONN_TERMINATE_LOCAL_HOST - we terminated connection"
+                        34 -> "GATT_CONN_LMP_TIMEOUT - link manager timeout"
+                        62 -> "GATT_CONN_FAIL_ESTABLISH - failed to establish connection"
+                        133 -> "GATT_ERROR(133) - possible bond/encryption issue"
+                        else -> "status=$status"
+                    }
+                    Log.i(TAG, "🔌 Disconnected from ${device.address}: $disconnectReason")
+                    
+                    // Handle connection establishment failures (status 62, 133) with retry logic
+                    // These errors often occur on first connection attempt and succeed on retry
+                    val shouldRetry = (status == 62 || status == 133) && 
+                                     device.bondState == BluetoothDevice.BOND_BONDED &&
+                                     pluginId != null
+                    
+                    if (shouldRetry) {
+                        Log.w(TAG, "⚠️ Connection failed with $status - will retry in 5 seconds...")
+                        Log.w(TAG, "   (This is normal on first attempt - encryption needs time to stabilize)")
+                        updateNotification("Connection failed - retrying...")
+                        
+                        gatt.close()
+                        connectedDevices.remove(device.address)
+                        pollingJobs[device.address]?.cancel()
+                        pollingJobs.remove(device.address)
+                        
+                        // Retry after 5 seconds (matches legacy app behavior)
+                        serviceScope.launch {
+                            delay(5000)
+                            Log.i(TAG, "🔄 Retrying connection to ${device.address}...")
+                            connectToDevice(device, pluginId!!)  // Safe because we checked pluginId != null above
+                        }
+                        return
+                    }
+                    
+                    // If gateway terminated with status 19, it might be a protocol issue
+                    if (status == 19) {
+                        Log.w(TAG, "⚠️ Gateway terminated connection - this may indicate:")
+                        Log.w(TAG, "   - Protocol issue (missing heartbeat, wrong commands)")
+                        Log.w(TAG, "   - Authentication/encryption mismatch")
+                        Log.w(TAG, "   - Gateway busy with another client")
+                    }
+                    
+                    updateNotification("Disconnected: $disconnectReason")
                     
                     connectedDevices.remove(device.address)
                     pollingJobs[device.address]?.cancel()
@@ -684,19 +772,23 @@ class BaseBleService : Service() {
                     }
                 }
                 
-                // NOTE: Skip MTU request - it was blocking subsequent GATT operations!
-                // The MTU request with this gateway returns status=133 and leaves a pending
-                // command in the BLE stack, causing "already has a pending command" errors.
-                // Default MTU of 23 is sufficient for our protocol.
+                // CRITICAL: Request MTU before plugin setup
+                // The gateway may expect MTU negotiation to complete before accepting notifications
+                // Even if it fails (status 133), the attempt itself may be part of the expected protocol
+                Log.d(TAG, "Requesting MTU 185...")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    gatt.requestMtu(185)
+                }
                 
-                // Allow LONGER time for the BLE stack to fully stabilize after service discovery
-                // This includes time for:
+                // Allow time for MTU negotiation to complete (or fail) before plugin setup
+                // This ensures the BLE stack is fully stabilized:
+                // - MTU negotiation completes (even if unsuccessful)
                 // - Encryption to complete (if link was re-established)
                 // - Internal GATT database to be fully populated
                 // - Any background operations to complete
                 serviceScope.launch(Dispatchers.Main) {
-                    delay(1500)  // 1.5 second stabilization delay
-                    Log.d(TAG, "Starting plugin after 1500ms delay...")
+                    delay(500)  // 500ms for MTU negotiation + stabilization
+                    Log.d(TAG, "Starting plugin after MTU request + delay...")
                     
                     // Get the plugin for this device
                     val deviceInfo = connectedDevices[gatt.device.address]
@@ -706,6 +798,12 @@ class BaseBleService : Service() {
                     } else null
                     
                     if (plugin != null) {
+                        // CRITICAL: Wire MQTT formatter BEFORE plugin setup so it can receive
+                        // events that arrive immediately after notification subscription
+                        if (pluginId == "onecontrol") {
+                            getOrCreateOneControlFormatter(gatt.device.address)
+                        }
+                        
                         // Create GATT operations interface for plugin
                         val gattOps = GattOperationsImpl(gatt)
                         
@@ -713,11 +811,6 @@ class BaseBleService : Service() {
                         val setupResult = plugin.onServicesDiscovered(gatt.device, gattOps)
                         if (setupResult.isFailure) {
                             Log.e(TAG, "Plugin setup failed: ${setupResult.exceptionOrNull()?.message}")
-                        } else {
-                            // Wire MQTT formatter for OneControl devices after successful setup
-                            if (pluginId == "onecontrol") {
-                                getOrCreateOneControlFormatter(gatt.device.address)
-                            }
                         }
                     }
                     
@@ -1138,6 +1231,10 @@ class BaseBleService : Service() {
                 if (!localSuccess) {
                     return Result.failure(Exception("Failed to enable local notifications for $uuid"))
                 }
+                
+                // CRITICAL: BLE stack needs time to process setCharacteristicNotification before CCCD write
+                // Without this delay, notifications may not work properly (gateway disconnects)
+                delay(100)
                 
                 // Write descriptor to enable notifications on remote device
                 val descriptor = characteristic.getDescriptor(

@@ -30,6 +30,9 @@ class OneControlMqttFormatter(
     // Track last known brightness for dimmers (for ON command without brightness)
     private val lastKnownBrightness = mutableMapOf<Int, Int>()
     
+    // Cache last published state to prevent MQTT flooding (deduplicate unchanged states)
+    private val lastPublishedState = mutableMapOf<String, Any>()
+    
     override suspend fun onStateUpdate(gatewayMac: String, update: OneControlStateUpdate) {
         when (update) {
             is OneControlStateUpdate.DimmableLight -> publishDimmableLightState(update)
@@ -39,24 +42,53 @@ class OneControlMqttFormatter(
             is OneControlStateUpdate.Hvac -> publishHvacState(update)
             is OneControlStateUpdate.SystemStatus -> publishSystemStatus(update)
             is OneControlStateUpdate.GatewayInfo -> publishGatewayInfo(update)
-            is OneControlStateUpdate.DeviceOnline -> publishDeviceOnline(update)
+            // DeviceOnline events are just logged in legacy app, not published to MQTT
+            // They flood at high rate and provide no actionable state for HA
+            is OneControlStateUpdate.DeviceOnline -> { /* No-op - legacy app doesn't publish these */ }
         }
     }
     
     override suspend fun onDeviceDiscovered(gatewayMac: String, update: OneControlStateUpdate) {
-        if (discoveryPublished.contains(update.deviceAddress)) return
+        val deviceKey = when (update) {
+            is OneControlStateUpdate.SystemStatus -> -1  // Special key for system sensors
+            is OneControlStateUpdate.GatewayInfo -> -2   // Special key for gateway info
+            else -> update.deviceAddress
+        }
+        
+        Log.i(TAG, "🔍 onDeviceDiscovered called: type=${update::class.simpleName}, deviceKey=$deviceKey, alreadyPublished=${discoveryPublished.contains(deviceKey)}")
+        
+        if (discoveryPublished.contains(deviceKey)) return
         
         when (update) {
-            is OneControlStateUpdate.DimmableLight -> publishDimmableLightDiscovery(update)
-            is OneControlStateUpdate.Switch -> publishSwitchDiscovery(update)
-            is OneControlStateUpdate.Cover -> publishCoverDiscovery(update)
-            is OneControlStateUpdate.Tank -> publishTankDiscovery(update)
-            is OneControlStateUpdate.Hvac -> publishHvacDiscovery(update)
-            is OneControlStateUpdate.SystemStatus -> publishSystemDiscovery()
+            is OneControlStateUpdate.DimmableLight -> {
+                Log.i(TAG, "📢 Publishing dimmable light discovery for ${update.tableId}:${update.deviceId}")
+                publishDimmableLightDiscovery(update)
+            }
+            is OneControlStateUpdate.Switch -> {
+                Log.i(TAG, "📢 Publishing switch discovery for ${update.tableId}:${update.deviceId}")
+                publishSwitchDiscovery(update)
+            }
+            is OneControlStateUpdate.Cover -> {
+                Log.i(TAG, "📢 Publishing cover discovery for ${update.tableId}:${update.deviceId}")
+                publishCoverDiscovery(update)
+            }
+            is OneControlStateUpdate.Tank -> {
+                Log.i(TAG, "📢 Publishing tank discovery for ${update.tableId}:${update.deviceId}")
+                publishTankDiscovery(update)
+            }
+            is OneControlStateUpdate.Hvac -> {
+                Log.i(TAG, "📢 Publishing HVAC discovery for ${update.tableId}:${update.deviceId}")
+                publishHvacDiscovery(update)
+            }
+            is OneControlStateUpdate.SystemStatus -> {
+                Log.i(TAG, "📢 Publishing system discovery")
+                publishSystemDiscovery()
+            }
+            is OneControlStateUpdate.GatewayInfo -> Log.d(TAG, "Gateway info has no separate discovery entities")
             else -> { /* No discovery for other types */ }
         }
         
-        discoveryPublished.add(update.deviceAddress)
+        discoveryPublished.add(deviceKey)
     }
     
     // ========================================================================
@@ -64,6 +96,13 @@ class OneControlMqttFormatter(
     // ========================================================================
     
     private suspend fun publishDimmableLightState(update: OneControlStateUpdate.DimmableLight) {
+        val stateKey = "light_${update.tableId}_${update.deviceId}"
+        val currentState = Pair(update.isOn, update.brightnessRaw)
+        
+        // Only publish if state changed (prevent MQTT flooding)
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         
         // Classic MQTT light schema: state + brightness topics (matching legacy app)
@@ -80,6 +119,13 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishSwitchState(update: OneControlStateUpdate.Switch) {
+        val stateKey = "switch_${update.tableId}_${update.deviceId}"
+        val currentState = update.isOn
+        
+        // Only publish if state changed
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         
         output.publishState("$baseTopic/state", if (update.isOn) "ON" else "OFF", retained = true)
@@ -89,6 +135,13 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishCoverState(update: OneControlStateUpdate.Cover) {
+        val stateKey = "cover_${update.tableId}_${update.deviceId}"
+        val currentState = Triple(update.status, update.lastDirection, update.position)
+        
+        // Only publish if state changed
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         
         // Map status to HA cover state
@@ -115,6 +168,13 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishTankState(update: OneControlStateUpdate.Tank) {
+        val stateKey = "tank_${update.tableId}_${update.deviceId}"
+        val currentState = Pair(update.level, update.fluidType)
+        
+        // Only publish if state changed
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         
         output.publishState("$baseTopic/level", update.level.toString(), retained = true)
@@ -127,6 +187,17 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishHvacState(update: OneControlStateUpdate.Hvac) {
+        val stateKey = "hvac_${update.tableId}_${update.deviceId}"
+        val currentState = listOf(
+            update.heatMode, update.fanMode, update.zoneMode,
+            update.heatSetpointF, update.coolSetpointF,
+            update.indoorTempF, update.outdoorTempF
+        )
+        
+        // Only publish if state changed
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         
         // Map heat mode to HA mode
@@ -173,6 +244,13 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishSystemStatus(update: OneControlStateUpdate.SystemStatus) {
+        val stateKey = "system_status"
+        val currentState = Pair(update.batteryVoltage, update.externalTempC)
+        
+        // Only publish if state changed
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         update.batteryVoltage?.let {
             output.publishState("$topicPrefix/system/voltage", String.format("%.2f", it), retained = true)
         }
@@ -188,6 +266,13 @@ class OneControlMqttFormatter(
     }
     
     private suspend fun publishDeviceOnline(update: OneControlStateUpdate.DeviceOnline) {
+        val stateKey = "online_${update.tableId}_${update.deviceId}"
+        val currentState = update.isOnline
+        
+        // Only publish if state changed (prevent MQTT flooding from 30ms heartbeats)
+        if (lastPublishedState[stateKey] == currentState) return
+        lastPublishedState[stateKey] = currentState
+        
         val baseTopic = "$topicPrefix/device/${update.tableId}/${update.deviceId}"
         output.publishState("$baseTopic/online", if (update.isOnline) "true" else "false", retained = true)
     }
@@ -238,7 +323,7 @@ class OneControlMqttFormatter(
         return name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
     }
     
-    private suspend fun publishDimmableLightDiscovery(update: OneControlStateUpdate.DimmableLight) {
+    suspend fun publishDimmableLightDiscovery(update: OneControlStateUpdate.DimmableLight) {
         val cleanMac = gatewayMac.replace(":", "").lowercase()
         val objectId = "light_${update.tableId.toString(16).padStart(2, '0')}_${update.deviceId.toString(16).padStart(2, '0')}"
         val uniqueId = "${DEVICE_ID_BASE}_${cleanMac}_$objectId"
