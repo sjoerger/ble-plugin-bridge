@@ -1079,9 +1079,9 @@ class OneControlGattCallback(
         
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
-        val brightness = data[3].toInt() and 0xFF
-        val modeByte = data[4].toInt() and 0xFF  // Mode byte for pending check
-        val isOn = brightness > 0
+        val modeByte = data[3].toInt() and 0xFF  // Mode byte: 0=Off, 1=On, 2=Blink, 3=Swell
+        val brightness = data[4].toInt() and 0xFF  // Brightness: 0-255
+        val isOn = modeByte > 0  // Light is ON if mode > 0
         
         val key = "$tableId:$deviceId"
         
@@ -1105,7 +1105,17 @@ class OneControlGattCallback(
             pendingDimmable.remove(key)
         }
         
+        // Spurious status guard: Gateway sometimes sends brightness=0 status updates even when light is on
+        // Ignore these if we have a last known brightness > 0 (light should be on)
+        val lastKnown = lastKnownDimmableBrightness[key]
+        Log.d(TAG, "Spurious check: brightness=$brightness mode=$modeByte lastKnown=$lastKnown")
+        if (brightness == 0 && modeByte == 0 && lastKnown != null && lastKnown > 0) {
+            Log.i(TAG, "🚫 Ignoring spurious off-state status (last known=$lastKnown)")
+            return  // Don't publish this spurious update
+        }
+        
         // Track last known brightness for restore-on-ON feature
+        // Only update when we receive non-zero brightness (never clear from status updates)
         if (brightness > 0) {
             lastKnownDimmableBrightness[key] = brightness
         }
@@ -1694,12 +1704,8 @@ class OneControlGattCallback(
             return sendDimmableCommand(writeChar, effectiveTableId, deviceId, 0)
         }
         
-        // Handle brightness: HA sends 255 for bare "ON", we restore last known brightness
-        val lastKnown = lastKnownDimmableBrightness[key]
-        val targetBrightness = when {
-            brightness == 255 && lastKnown != null -> lastKnown  // Restore last known
-            else -> brightness.coerceIn(1, 255)
-        }
+        // Handle brightness: treat all values including 255 as literal brightness
+        val targetBrightness = brightness.coerceIn(1, 255)
         
         // Debounce: schedule the command after DIMMER_DEBOUNCE_MS
         // If another command comes in before then, it will replace this one
