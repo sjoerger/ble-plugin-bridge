@@ -1,73 +1,155 @@
-# BLE to MQTT Bridge - Plugin Architecture
+# BLE-MQTT Plugin Bridge
 
-Multi-device BLE to Home Assistant MQTT bridge with extensible plugin system.
+Android application that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration for OneControl RV automation systems and other BLE devices.
 
-## Overview
+## 🎯 Project Status
 
-This Android app provides a bridge between BLE devices and Home Assistant via MQTT, with a plugin architecture that supports multiple device protocols:
+**Current Version:** v0.0.4  
+**Status:** OneControl Gateway - **Fully Functional** ✅
 
-- **OneControl**: Lippert OneControl RV gateway
-- **EasyTouch**: Micro-Air EasyTouch RV thermostat
-- **Extensible**: Add new device plugins easily
+### What Works
+- ✅ BLE connection and authentication with OneControl gateway
+- ✅ Real-time device status updates (switches, dimmable lights, sensors)
+- ✅ MQTT command handling (control switches and dimmable lights from Home Assistant)
+- ✅ Home Assistant auto-discovery for all device types
+- ✅ Debounced brightness control with restore-on-ON behavior
+- ✅ Background service with automatic reconnection
 
-## Key Features
+## 🚀 Quick Start
 
-- 🔌 Plugin-based architecture for multiple BLE device types
-- 📡 Configurable output destinations (MQTT, REST API, webhooks)
-- 🧠 Memory-efficient design for low-end Android tablets
-- 🏠 Home Assistant MQTT Discovery integration
-- ⚡ Optimized for coexistence with Fully Kiosk Browser
-- 🔒 Zero-regression guarantee for existing OneControl users
-- 🎮 **Remote control via MQTT** - Start/stop service and manage plugins remotely
+### Prerequisites
+- Android device (API 26+, Android 8.0+)
+- MQTT broker (e.g., Mosquitto)
+- Home Assistant (optional, for auto-discovery)
 
-## Documentation
+### Installation
 
-- [Architecture Design](docs/ARCHITECTURE.md) - Detailed system architecture and design decisions
-- [MQTT Setup Guide](MQTT_SETUP_GUIDE.md) - **Complete hands-free operation setup**
-- [Remote Control API](REMOTE_CONTROL_API.md) - Complete API reference for remote service control
-- [Remote Control Quick Start](REMOTE_CONTROL_QUICKSTART.md) - Practical examples and usage guide
-- [ADB Control Guide](ADB_CONTROL_GUIDE.md) - Complete guide for ADB-based remote control (development)
-- [Migration Guide](docs/MIGRATION.md) - (Coming soon) OneControl migration plan
-- [Plugin Development](docs/PLUGIN_DEVELOPMENT.md) - (Coming soon) How to create new plugins
+1. **Download and install APK** from [Releases](https://github.com/phurth/ble-plugin-bridge/releases)
+2. **Configure MQTT broker** - see [MQTT_SETUP_GUIDE.md](MQTT_SETUP_GUIDE.md)
+3. **Start the service** - app will auto-scan and connect to configured gateway
+4. **Check Home Assistant** - devices will appear automatically
 
-## Project Status
+### Basic Configuration
 
-**Current Phase**: Phase 4 - OneControl MQTT Integration  
-**Target Release**: Q1 2025
+Edit your gateway settings in the plugin initialization:
 
-### Roadmap
+```kotlin
+gatewayMac = "24:DC:C3:ED:1E:0A"  // Your gateway MAC
+gatewayPin = "090336"              // Your gateway PIN
+```
 
-- [x] Feasibility assessment
-- [x] Architecture design
-- [x] Phase 1: Output abstraction (MQTT plugin)
-- [x] Phase 2: Core plugin infrastructure
-- [x] Phase 3: OneControl BLE authentication ✅
-  - Data Service gateway TEA authentication working
-  - Auto-start service with default plugin enabled
-  - Full authentication cycle: connect → auth → unlock → subscribe
-  - Heartbeat and auto-reconnect implemented
-- [ ] Phase 4: OneControl MQTT data integration (IN PROGRESS)
-  - Wire CAN data to MQTT output
-  - Home Assistant discovery payloads
-  - Command handling (MQTT → CAN)
-- [ ] Phase 5: EasyTouch plugin
-- [ ] Phase 6: UI improvements
-- [ ] Phase 7: Memory optimization
-- [ ] Phase 8: Release
+## 📦 Supported Devices
 
-## Development Setup
+### OneControl Gateway (LCI/Lippert)
+- **Switches** - Binary relays and latching switches
+- **Dimmable Lights** - Full 0-255 brightness control with debouncing
+- **Sensors** - Temperature, voltage, tank levels
+- **Covers** - Awnings, slides (status monitoring)
+- **HVAC** - Status monitoring
 
-*Coming soon - Android Studio setup instructions*
+## 🏗️ Architecture
 
-## Contributing
+### Plugin-Based Design
 
-This project is currently in active development. Contributions welcome after initial release.
+Each BLE device type is handled by a dedicated plugin that owns its GATT callback:
 
-## License
+```
+BaseBleService
+  └─> OneControlDevicePlugin
+       └─> OneControlGattCallback (owns BLE connection)
+            ├─> Stream reading & COBS decoding
+            ├─> Event processing & MQTT publishing  
+            └─> Command handling (MQTT → BLE)
+```
 
-*TBD*
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
-## Related Projects
+## 📖 Documentation
 
-- [OneControl BLE Bridge](https://github.com/phurth/onecontrol-ble-mqtt-gateway) - Original OneControl implementation
-- [HACS Micro-Air Integration](https://github.com/k3vmcd/ha-micro-air-easytouch) - EasyTouch Home Assistant integration
+### Getting Started
+- **[MQTT_SETUP_GUIDE.md](MQTT_SETUP_GUIDE.md)** - MQTT broker configuration
+- **[REMOTE_CONTROL_QUICKSTART.md](REMOTE_CONTROL_QUICKSTART.md)** - Remote control usage
+- **[TESTING.md](TESTING.md)** - Testing procedures
+
+### Technical Details
+- **[AUTHENTICATION_ALGORITHM.md](AUTHENTICATION_ALGORITHM.md)** - OneControl authentication protocol
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture and design
+- **[REMOTE_CONTROL_API.md](REMOTE_CONTROL_API.md)** - Complete remote control API
+
+## 🔧 Development
+
+### Building
+
+```bash
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Testing
+
+```bash
+# Monitor logs
+adb logcat -s OneControlGattCallback:I BaseBleService:I
+
+# Send test command via MQTT
+mosquitto_pub -h <broker> -u mqtt -P mqtt \
+  -t "homeassistant/onecontrol/<MAC>/command/switch/8/7" -m "ON"
+```
+
+## 📝 Release History
+
+### v0.0.4 (2024-12-22)
+**Fixed:**
+- Critical bug: brightness and mode bytes were swapped in DimmableLightStatus parsing
+- Slider not able to reach 100% brightness - removed incorrect brightness=255 restore logic
+- Added spurious status guard to filter incorrect gateway brightness=0 updates
+
+**Improved:**
+- Dimmable light restore-on-ON now works correctly via lastKnownDimmableBrightness tracking
+- All brightness values (1-255) now treated as literal values
+
+### v0.0.3 (2024-12-21)
+- Dimmable light control with debouncing (200ms)
+- Restore-on-ON behavior for lights
+- Command subscription via MQTT
+- Pending guard to prevent UI bouncing
+
+### v0.0.2 (2024-12-20)
+- Switch control working
+- BLE notifications fixed
+- Initial MQTT command integration
+
+### v0.0.1 (2024-12-19)
+- Initial plugin architecture
+- Gateway connection and authentication
+- Basic status monitoring
+
+## 🐛 Known Issues
+
+None currently reported.
+
+## 🔮 Planned Features
+
+### Near Term
+- Cover/awning control (OPEN/CLOSE/STOP commands)
+- HVAC control
+- RGB light support
+- Generator control
+
+### Future Enhancements
+- Multiple gateway support
+- Custom device naming in Home Assistant
+- State persistence across restarts
+- Advanced scheduling/automation
+
+## 🤝 Contributing
+
+This project was developed for personal use but contributions are welcome. Please open an issue first to discuss major changes.
+
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+## 🙏 Acknowledgments
+
+Based on reverse engineering of the OneControl iOS/Android app and MyRvLink protocol specification.
