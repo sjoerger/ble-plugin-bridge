@@ -2,7 +2,9 @@ package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * Maps FUNCTION_NAME values (from IDS CAN protocol) to friendly device names.
- * Based on FUNCTION_NAME.cs from IDS.Core.IDS_CAN.Descriptors (4.6.4.0)
+ * Complete mapping of all 445 function names from FUNCTION_NAME.cs in IDS.Core.IDS_CAN.Descriptors (4.6.4.0)
+ * 
+ * These names are used for device metadata when available via GetDevicesMetadata response.
  */
 object FunctionNameMapper {
     
@@ -10,20 +12,32 @@ object FunctionNameMapper {
      * Get a friendly name for a device based on its FunctionName and FunctionInstance.
      * 
      * @param functionName The numeric FUNCTION_NAME value (e.g., 41 = Living Room Ceiling Light)
-     * @param functionInstance The instance number (used when name contains {0})
+     * @param functionInstance The instance number (used when there are multiple of the same device)
      * @return Friendly name like "Living Room Ceiling Light" or "Slide 1"
      */
     fun getFriendlyName(functionName: Int, functionInstance: Int): String {
-        val baseName = functionNames[functionName] ?: "Unknown Device"
+        val baseName = functionNames[functionName] ?: "Unknown Device $functionName"
         
-        // Replace {0} placeholder with instance number
-        return if (baseName.contains("{0}")) {
-            baseName.replace("{0}", functionInstance.toString())
-        } else if (functionInstance > 0) {
+        // Append instance number only if > 0 (indicating multiple devices of same type)
+        return if (functionInstance > 0) {
             "$baseName $functionInstance"
         } else {
             baseName
         }
+    }
+    
+    /**
+     * Get the base name for a function ID without instance number
+     */
+    fun getBaseName(functionName: Int): String {
+        return functionNames[functionName] ?: "Unknown Device $functionName"
+    }
+    
+    /**
+     * Check if a function name ID is known
+     */
+    fun isKnown(functionName: Int): Boolean {
+        return functionNames.containsKey(functionName)
     }
     
     /**
@@ -38,112 +52,158 @@ object FunctionNameMapper {
     }
     
     /**
-     * Mapping of FUNCTION_NAME numeric values to friendly names.
-     * Only includes common RV device types - unknown values will show as "Unknown Device".
+     * Complete mapping of FUNCTION_NAME numeric values to friendly names.
+     * All 445 function names from IDS.Core.IDS_CAN.Descriptors (4.6.4.0)
      */
     private val functionNames = mapOf(
-        // Water & Plumbing
+        // System & Diagnostic (1-2)
+        1 to "Diagnostic Tool",
+        2 to "MyRV Tablet",
+        
+        // Water & Plumbing (3-5, 67-87, 107, 173-175, 270, 295-296, 303, 381, 428-445)
         3 to "Gas Water Heater",
         4 to "Electric Water Heater",
         5 to "Water Pump",
         67 to "Fresh Tank",
         68 to "Grey Tank",
         69 to "Black Tank",
+        70 to "Fuel Tank",
+        71 to "Generator Fuel Tank",
+        72 to "Auxiliary Fuel Tank",
+        73 to "Front Bath Grey Tank",
+        74 to "Front Bath Fresh Tank",
+        75 to "Front Bath Black Tank",
+        76 to "Rear Bath Grey Tank",
+        77 to "Rear Bath Fresh Tank",
+        78 to "Rear Bath Black Tank",
+        79 to "Main Bath Grey Tank",
+        80 to "Main Bath Fresh Tank",
+        81 to "Main Bath Black Tank",
+        82 to "Galley Grey Tank",
+        83 to "Galley Fresh Tank",
+        84 to "Galley Black Tank",
+        85 to "Kitchen Grey Tank",
+        86 to "Kitchen Fresh Tank",
+        87 to "Kitchen Black Tank",
+        107 to "Water Tank Heater",
+        173 to "Fresh Tank Heater",
+        174 to "Grey Tank Heater",
+        175 to "Black Tank Heater",
+        270 to "Tank Heater",
         295 to "Water Heater",
         296 to "Water Heaters",
+        303 to "Waste Valve",
+        381 to "Holding Tanks Heater",
         428 to "Fresh Tank Valve",
         429 to "Grey Tank Valve",
         430 to "Black Tank Valve",
+        431 to "Front Bath Grey Tank Valve",
+        432 to "Front Bath Fresh Tank Valve",
+        433 to "Front Bath Black Tank Valve",
+        434 to "Rear Bath Grey Tank Valve",
+        435 to "Rear Bath Fresh Tank Valve",
+        436 to "Rear Bath Black Tank Valve",
+        437 to "Main Bath Grey Tank Valve",
+        438 to "Main Bath Fresh Tank Valve",
+        439 to "Main Bath Black Tank Valve",
+        440 to "Galley Bath Grey Tank Valve",
+        441 to "Galley Bath Fresh Tank Valve",
+        442 to "Galley Bath Black Tank Valve",
+        443 to "Kitchen Bath Grey Tank Valve",
+        444 to "Kitchen Bath Fresh Tank Valve",
+        445 to "Kitchen Bath Black Tank Valve",
         
-        // Ventilation & Climate
+        // Ventilation & Vent Covers (6, 93, 110-117, 264-269, 398-399)
         6 to "Bath Vent",
-        143 to "Roof Vent",
-        145 to "Kitchen Vent",
-        281 to "Living Room Climate Zone",
-        284 to "Front Bedroom Climate Zone",
-        285 to "Rear Bedroom Climate Zone",
+        93 to "Bath Vent Cover",
+        110 to "Vent Cover",
+        111 to "Front Bedroom Vent Cover",
+        112 to "Bedroom Vent Cover",
+        113 to "Front Bathroom Vent Cover",
+        114 to "Main Bathroom Vent Cover",
+        115 to "Rear Bathroom Vent Cover",
+        116 to "Kitchen Vent Cover",
+        117 to "Living Room Vent Cover",
+        264 to "Fan",
+        265 to "Bath Fan",
+        266 to "Rear Fan",
+        267 to "Front Fan",
+        268 to "Kitchen Fan",
+        269 to "Ceiling Fan",
         398 to "Computer Fan",
         399 to "Battery Fan",
         
-        // Awnings
-        70 to "Front Awning",
-        71 to "Rear Awning",
-        72 to "Patio Awning",
-        73 to "Door Awning",
-        164 to "Driver Awning",
-        165 to "Passenger Awning",
-        300 to "Awning {0} (if equip)",
-        319 to "Garage Awning",
-        379 to "Front Awning",
-        390 to "Slide Awning",
-        
-        // Slides
-        74 to "Front Slide",
-        75 to "Rear Slide",
-        76 to "Driver Slide",
-        77 to "Passenger Slide",
-        78 to "Bedroom Slide",
-        79 to "Living Slide",
-        80 to "Kitchen Slide",
-        81 to "Main Slide",
-        170 to "Driver Side Slide",
-        171 to "Off Door Side Slide",
-        172 to "Main Room Slide",
-        173 to "Driver Side Rear Slide",
-        174 to "Off Door Side Rear Slide",
-        175 to "Right Slide Room",
-        176 to "Left Slide Room",
-        299 to "Slide {0} (if equip)",
-        315 to "Bathroom Slide",
-        380 to "Dinette Slide",
-        400 to "Right Slide Room",
-        401 to "Left Slide Room",
-        407 to "Door Side Sofa Slide",
-        408 to "Off Door Side Sofa Slide",
-        409 to "Rear Bed Slide",
-        
-        // Jacks & Leveling
-        82 to "Front Jack",
-        83 to "Rear Jack",
-        84 to "Driver Side Jack",
-        85 to "Passenger Side Jack",
-        86 to "Leveling Jack",
-        87 to "Landing Gear",
-        404 to "Base Camp Leveler",
-        
-        // General Lights
+        // Lights - General (7-9, 47-49, 61-66, 120-132, 143-149, 169-172, 177-182, 195-196, 220, 271-280, 289-294, 305-314, 360, 362-366, 392-397, 402, 410-414)
         7 to "Light",
         8 to "Flood Light",
         9 to "Work Light",
         47 to "Security Light",
         48 to "Porch Light",
+        49 to "Awning Light",
         61 to "Ceiling Light",
         62 to "Entry Light",
+        63 to "Bed Ceiling Light",
+        64 to "Bedroom Lav Light",
         65 to "Shower Light",
-        88 to "Interior Light",
-        89 to "Exterior Light",
-        94 to "Step Light",
-        95 to "Loading Light",
-        96 to "Cargo Light",
-        97 to "Accent Light",
-        98 to "Cabinet Light",
-        133 to "Exterior Lighting",
-        177 to "Night Light",
-        260 to "Reading Light",
+        66 to "Galley Light",
+        120 to "Patio Light",
+        121 to "Hutch Light",
+        122 to "Scare Light",
+        123 to "Dinette Light",
+        124 to "Bar Light",
+        125 to "Overhead Light",
+        126 to "Overhead Bar Light",
+        127 to "Foyer Light",
+        128 to "Ramp Door Light",
+        129 to "Entertainment Light",
+        130 to "Rear Entry Door Light",
+        131 to "Ceiling Fan Light",
+        132 to "Overhead Fan Light",
+        143 to "Exterior Light",
+        144 to "Lower Accent Light",
+        145 to "Upper Accent Light",
+        146 to "DS Security Light",
+        147 to "ODS Security Light",
+        149 to "Hitch Light",
+        169 to "Front Cap Light",
+        170 to "Step Light",
+        171 to "DS Flood Light",
+        172 to "Interior Light",
+        177 to "Stall Light",
+        178 to "Main Light",
+        179 to "Bath Light",
+        180 to "Bunk Light",
+        181 to "Bed Light",
+        182 to "Cabinet Light",
+        195 to "Compartment Light",
+        196 to "Trunk Light",
+        220 to "Accent Light",
+        271 to "Front Ceiling Light",
+        272 to "Rear Ceiling Light",
+        273 to "Cargo Light",
+        274 to "Fascia Light",
+        275 to "Slide Ceiling Light",
+        276 to "Slide Overhead Light",
+        277 to "Decor Light",
+        278 to "Reading Light",
         279 to "Front Reading Light",
         280 to "Rear Reading Light",
-        289 to "Men's Light",
-        290 to "Women's Light",
+        289 to "Mens Light",
+        290 to "Womens Light",
         291 to "Service Light",
         292 to "ODS Flood Light",
         293 to "Underbody Accent Light",
         294 to "Speaker Light",
-        301 to "Awning Light {0} (if equip)",
-        302 to "Interior Light {0} (if equip)",
+        305 to "Front Locker Light",
+        306 to "Rear Locker Light",
         308 to "Rock Light",
         309 to "Chassis Light",
         310 to "Exterior Shower Light",
-        360 to "Jack Lights",
+        311 to "Living Room Accent Light",
+        312 to "Rear Flood Light",
+        313 to "Passenger Flood Light",
+        314 to "Driver Flood Light",
+        360 to "Jacks Lights",
         362 to "Interior Step Light",
         363 to "Exterior Step Light",
         366 to "Soffit Light",
@@ -158,30 +218,9 @@ object FunctionNameMapper {
         411 to "Utility Cabinet Light",
         412 to "Chase Light",
         413 to "Floor Lights",
-        414 to "Roof Top Tent Light",
+        414 to "RTT Light",
         
-        // Living Room Lights
-        41 to "Living Room Ceiling Light",
-        42 to "Living Room Sconce Light",
-        43 to "Living Room Pendants Light",
-        44 to "Living Room Bar Light",
-        58 to "Living Room Light",
-        311 to "Living Room Accent Light",
-        
-        // Kitchen Lights
-        32 to "Kitchen Ceiling Light",
-        33 to "Kitchen Sconce Light",
-        34 to "Kitchen Pendants Light",
-        35 to "Kitchen Range Light",
-        36 to "Kitchen Counter Light",
-        37 to "Kitchen Bar Light",
-        38 to "Kitchen Island Light",
-        39 to "Kitchen Chandelier Light",
-        40 to "Kitchen Under Cabinet Light",
-        59 to "Kitchen Light",
-        406 to "Kitchen Pendant Light",
-        
-        // Bedroom Lights
+        // Bedroom Lights (10-20, 56-57, 222-223, 227)
         10 to "Front Bedroom Ceiling Light",
         11 to "Front Bedroom Overhead Light",
         12 to "Front Bedroom Vanity Light",
@@ -195,10 +234,16 @@ object FunctionNameMapper {
         20 to "Loft Light",
         56 to "Bunk Room Light",
         57 to "Bedroom Light",
-        63 to "Bed Ceiling Light",
-        64 to "Bedroom Lav Light",
+        222 to "Bedroom Accent Light",
+        223 to "Front Bedroom Accent Light",
+        227 to "Rear Bedroom Accent Light",
         
-        // Bathroom Lights
+        // Hall Lights (21-22, 55)
+        21 to "Front Hall Light",
+        22 to "Rear Hall Light",
+        55 to "Hall Light",
+        
+        // Bathroom Lights (23-31, 50-54, 221)
         23 to "Front Bathroom Light",
         24 to "Front Bathroom Vanity Light",
         25 to "Front Bathroom Ceiling Light",
@@ -213,18 +258,39 @@ object FunctionNameMapper {
         52 to "Bathroom Ceiling Light",
         53 to "Bathroom Shower Light",
         54 to "Bathroom Sconce Light",
+        221 to "Bathroom Accent Light",
         
-        // Hall Lights
-        21 to "Front Hall Light",
-        22 to "Rear Hall Light",
-        55 to "Hall Light",
+        // Kitchen Lights (32-40, 59, 225, 406)
+        32 to "Kitchen Ceiling Light",
+        33 to "Kitchen Sconce Light",
+        34 to "Kitchen Pendants Light",
+        35 to "Kitchen Range Light",
+        36 to "Kitchen Counter Light",
+        37 to "Kitchen Bar Light",
+        38 to "Kitchen Island Light",
+        39 to "Kitchen Chandelier Light",
+        40 to "Kitchen Under Cabinet Light",
+        59 to "Kitchen Light",
+        225 to "Kitchen Accent Light",
+        406 to "Kitchen Pendant Light",
         
-        // Garage Lights
+        // Living Room Lights (41-44, 58)
+        41 to "Living Room Ceiling Light",
+        42 to "Living Room Sconce Light",
+        43 to "Living Room Pendants Light",
+        44 to "Living Room Bar Light",
+        58 to "Living Room Light",
+        
+        // Garage Lights (45-46, 224)
         45 to "Garage Ceiling Light",
         46 to "Garage Cabinet Light",
+        224 to "Garage Accent Light",
         
-        // Awning Lights
-        49 to "Awning Light",
+        // Lounge & Patio Lights (60, 226)
+        60 to "Lounge Light",
+        226 to "Patio Accent Light",
+        
+        // Awning Lights (385-391)
         385 to "Patio Awning Light",
         386 to "Garage Awning Light",
         387 to "Rear Awning Light",
@@ -232,65 +298,246 @@ object FunctionNameMapper {
         389 to "Slide Awning Light",
         391 to "Front Awning Light",
         
-        // Locker Lights
-        305 to "Front Locker Light",
-        306 to "Rear Locker Light",
+        // Landing Gear & Stabilizers (88-90, 106, 109, 118-119, 141-142, 187-190, 250-252, 404)
+        88 to "Landing Gear",
+        89 to "Front Stabilizer",
+        90 to "Rear Stabilizer",
+        106 to "Level Up Leveler",
+        109 to "Leveler",
+        118 to "Four Leg Truck Camper Leveler",
+        119 to "Six Leg Hall Effect EJ Leveler",
+        141 to "Jacks",
+        142 to "Leveler 2",
+        187 to "Level Up Unity",
+        188 to "TT Leveler",
+        189 to "Travel Trailer Leveler",
+        190 to "Fifth Wheel Leveler",
+        250 to "Left Stabilizer",
+        251 to "Right Stabilizer",
+        252 to "Stabilizer",
+        404 to "Base Camp Leveler",
         
-        // Galley/Lounge
-        60 to "Lounge Light",
-        66 to "Galley Light",
+        // Lifts (91-92, 286-288, 316)
+        91 to "TV Lift",
+        92 to "Bed Lift",
+        286 to "Bed Tilt",
+        287 to "Front Bed Tilt",
+        288 to "Rear Bed Tilt",
+        316 to "Roof Lift",
         
-        // Flood Lights
-        312 to "Rear Flood Light",
-        313 to "Passenger Flood Light",
-        314 to "Driver Flood Light",
+        // Doors & Locks (94, 213-219, 263)
+        94 to "Door Lock",
+        213 to "Bathroom Door Lock",
+        214 to "Bedroom Door Lock",
+        215 to "Front Door Lock",
+        216 to "Garage Door Lock",
+        217 to "Main Door Lock",
+        218 to "Patio Door Lock",
+        219 to "Rear Door Lock",
+        263 to "Ramp Door",
         
-        // Power & Battery
-        92 to "Inverter Charger",
-        93 to "Generator",
-        154 to "Solar Panel",
+        // Generator & Power (95, 191, 253-262, 307, 317-318, 355-359, 367-378, 382-384)
+        95 to "Generator",
+        191 to "Fuel Pump",
+        253 to "Solar",
+        254 to "Solar Power",
+        255 to "Battery",
+        256 to "Main Battery",
+        257 to "Aux Battery",
+        258 to "Shore Power",
+        259 to "AC Power",
+        260 to "AC Mains",
+        261 to "Aux Power",
+        262 to "Outputs",
+        307 to "Rear Aux Power",
+        317 to "Yeti Package",
+        318 to "Propane Locker",
         355 to "Auxiliary Battery",
         356 to "Chassis Battery",
         357 to "House Battery",
         358 to "Kitchen Battery",
+        359 to "Electronic Sway Control",
         367 to "Battery Bank",
         368 to "RV Battery",
         369 to "Solar Battery",
         370 to "Tongue Battery",
+        374 to "Lead Acid",
+        375 to "Liquid Lead Acid",
+        376 to "Gel Lead Acid",
+        377 to "AGM Absorbent Glass Mat",
+        378 to "Lithium",
         382 to "Inverter",
         383 to "Battery Heat",
+        384 to "Camera Power",
         
-        // Pumps & Motors
-        90 to "Macerator Pump",
-        91 to "Sump Pump",
+        // Slides (96-104, 133-137, 148, 299, 315, 380, 400-401, 407-409)
+        96 to "Slide",
+        97 to "Main Slide",
+        98 to "Bedroom Slide",
+        99 to "Galley Slide",
+        100 to "Kitchen Slide",
+        101 to "Closet Slide",
+        102 to "Optional Slide",
+        103 to "Door Side Slide",
+        104 to "Off Door Slide",
+        133 to "Bunk Slide",
+        134 to "Bed Slide",
+        135 to "Wardrobe Slide",
+        136 to "Entertainment Slide",
+        137 to "Sofa Slide",
+        148 to "Slide In Slide",
+        299 to "Slide If Equip",
+        315 to "Bathroom Slide",
+        380 to "Dinette Slide",
+        400 to "Right Slide Room",
+        401 to "Left Slide Room",
+        407 to "Door Side Sofa Slide",
+        408 to "Off Door Side Sofa Slide",
+        409 to "Rear Bed Slide",
         
-        // Heaters
-        135 to "Tank Heater",
-        136 to "Furnace",
-        137 to "Electric Heat",
-        317 to "Yeti Package",
-        318 to "Propane Locker",
-        381 to "Holding Tanks Heater",
+        // Awnings (105, 138-140, 300, 319, 361, 379, 390)
+        105 to "Awning",
+        138 to "Patio Awning",
+        139 to "Rear Awning",
+        140 to "Side Awning",
+        300 to "Awning If Equip",
+        319 to "Garage Awning",
+        361 to "Awning Sensor",
+        379 to "Front Awning",
+        390 to "Slide Awning",
         
-        // Other
-        99 to "Entry Step",
-        101 to "Utility",
-        129 to "Switches",
-        130 to "Lights",
-        131 to "Levelers",
-        132 to "Slides",
-        134 to "Step",
-        286 to "Bed Tilt",
-        287 to "Front Bed Tilt",
-        288 to "Rear Bed Tilt",
-        307 to "Rear Aux Power",
-        316 to "Roof Lift",
+        // Touchscreens & Networking (108, 183-186, 297-298, 304, 320-323, 353-354, 364, 403)
+        108 to "MyRV Touchscreen",
+        183 to "Network Bridge",
+        184 to "Ethernet Bridge",
+        185 to "WiFi Bridge",
+        186 to "In Transit Power Disconnect",
+        297 to "AquaFi",
+        298 to "Connect Anywhere",
+        304 to "Tire Linc",
         320 to "Monitor Panel",
         321 to "Camera",
-        384 to "Camera Power",
-        405 to "Refrigerator",
+        322 to "Jayco AUS TBB GW",
+        323 to "Gateway RVLink",
+        353 to "LOCAP Gateway",
+        354 to "Bootloader",
+        364 to "WiFi Booster",
+        403 to "Base Camp Touchscreen",
         
-        // Power Shades
+        // Entertainment (150-165, 197-212, 228-249, 365)
+        150 to "Clock",
+        151 to "TV",
+        152 to "DVD",
+        153 to "Blu Ray",
+        154 to "VCR",
+        155 to "PVR",
+        156 to "Cable",
+        157 to "Satellite",
+        158 to "Audio",
+        159 to "CD Player",
+        160 to "Tuner",
+        161 to "Radio",
+        162 to "Speakers",
+        163 to "Game",
+        164 to "Clock Radio",
+        165 to "Aux",
+        197 to "Bar TV",
+        198 to "Bathroom TV",
+        199 to "Bedroom TV",
+        200 to "Bunk Room TV",
+        201 to "Exterior TV",
+        202 to "Front Bathroom TV",
+        203 to "Front Bedroom TV",
+        204 to "Garage TV",
+        205 to "Kitchen TV",
+        206 to "Living Room TV",
+        207 to "Loft TV",
+        208 to "Lounge TV",
+        209 to "Main TV",
+        210 to "Patio TV",
+        211 to "Rear Bathroom TV",
+        212 to "Rear Bedroom TV",
+        228 to "Bedroom Radio",
+        229 to "Bunk Room Radio",
+        230 to "Exterior Radio",
+        231 to "Front Bedroom Radio",
+        232 to "Garage Radio",
+        233 to "Kitchen Radio",
+        234 to "Living Room Radio",
+        235 to "Loft Radio",
+        236 to "Patio Radio",
+        237 to "Rear Bedroom Radio",
+        238 to "Bedroom Entertainment System",
+        239 to "Bunk Room Entertainment System",
+        240 to "Entertainment System",
+        241 to "Exterior Entertainment System",
+        242 to "Front Bedroom Entertainment System",
+        243 to "Garage Entertainment System",
+        244 to "Kitchen Entertainment System",
+        245 to "Living Room Entertainment System",
+        246 to "Loft Entertainment System",
+        247 to "Main Entertainment System",
+        248 to "Patio Entertainment System",
+        249 to "Rear Bedroom Entertainment System",
+        365 to "Audible Alert",
+        
+        // Climate Zones (166-168, 192-194, 281-285)
+        166 to "Climate Zone",
+        167 to "Fireplace",
+        168 to "Thermostat",
+        192 to "Main Climate Zone",
+        193 to "Bedroom Climate Zone",
+        194 to "Garage Climate Zone",
+        281 to "Living Room Climate Zone",
+        282 to "Front Living Room Climate Zone",
+        283 to "Rear Living Room Climate Zone",
+        284 to "Front Bedroom Climate Zone",
+        285 to "Rear Bedroom Climate Zone",
+        
+        // LP Tanks (176, 345-351)
+        176 to "LP Tank",
+        345 to "LP Tank RV",
+        346 to "LP Tank Home",
+        347 to "LP Tank Cabin",
+        348 to "LP Tank BBQ",
+        349 to "LP Tank Grill",
+        350 to "LP Tank Submarine",
+        351 to "LP Tank Other",
+        
+        // Conditional Equipment (301-302)
+        301 to "Awning Light If Equip",
+        302 to "Interior Light If Equip",
+        
+        // Temperature Sensors (324-344)
+        324 to "Accessory Temperature",
+        325 to "Accessory Refrigerator",
+        326 to "Accessory Fridge",
+        327 to "Accessory Freezer",
+        328 to "Accessory External",
+        330 to "Temp Refrigerator",
+        331 to "Temp Refrigerator Home",
+        332 to "Temp Freezer",
+        333 to "Temp Freezer Home",
+        334 to "Temp Cooler",
+        335 to "Temp Kitchen",
+        336 to "Temp Living Room",
+        337 to "Temp Bedroom",
+        338 to "Temp Master Bedroom",
+        339 to "Temp Garage",
+        340 to "Temp Basement",
+        341 to "Temp Bathroom",
+        342 to "Temp Storage Area",
+        343 to "Temp Drivers Area",
+        344 to "Temp Bunks",
+        
+        // Brake Controllers (329, 352, 371-373)
+        329 to "Trailer Brake Controller",
+        352 to "Anti Lock Braking System",
+        371 to "Axle1 Brake Controller",
+        372 to "Axle2 Brake Controller",
+        373 to "Axle3 Brake Controller",
+        
+        // Power Shades (415-427)
         415 to "Upper Power Shades",
         416 to "Lower Power Shades",
         417 to "Living Room Power Shades",
@@ -305,27 +552,8 @@ object FunctionNameMapper {
         426 to "Door Side Power Shades",
         427 to "Off Door Side Power Shades",
         
-        // Temperature Sensors
-        324 to "Accessory Temperature",
-        325 to "Accessory Refrigerator",
-        326 to "Accessory Fridge",
-        327 to "Accessory Freezer",
-        328 to "Accessory External",
-        330 to "Refrigerator Temperature",
-        331 to "Refrigerator Temperature Home",
-        332 to "Freezer Temperature",
-        333 to "Freezer Temperature Home",
-        334 to "Cooler Temperature",
-        335 to "Kitchen Temperature",
-        336 to "Living Room Temperature",
-        337 to "Bedroom Temperature",
-        338 to "Master Bedroom Temperature",
-        339 to "Garage Temperature",
-        340 to "Basement Temperature",
-        341 to "Bathroom Temperature",
-        342 to "Storage Area Temperature",
-        343 to "Drivers Area Temperature",
-        344 to "Bunks Temperature"
+        // Refrigerator (405)
+        405 to "Refrigerator"
     )
 }
 

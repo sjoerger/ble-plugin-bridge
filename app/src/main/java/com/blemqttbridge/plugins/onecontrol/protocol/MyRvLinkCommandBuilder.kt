@@ -170,5 +170,61 @@ object MyRvLinkCommandBuilder {
         
         return command
     }
+    
+    /**
+     * Build ActionHBridge (cover/slide/awning) command
+     * CommandType: 0x41 (ActionMovement)
+     * Format: [ClientCommandId (2 bytes)][CommandType=0x41][DeviceTableId][DeviceId][Command]
+     * 
+     * Command byte values (HBridgeCommand enum):
+     *   0x00 = Stop
+     *   0x01 = Forward (retract/close)
+     *   0x02 = Reverse (extend/open)
+     *   0x03 = ClearUserClearRequiredLatch (clear fault)
+     *   0x04 = HomeReset
+     *   0x05 = AutoForward
+     *   0x06 = AutoReverse
+     */
+    fun buildActionHBridge(
+        clientCommandId: UShort,
+        deviceTableId: Byte,
+        deviceId: Byte,
+        command: Byte
+    ): ByteArray {
+        return byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),           // CmdId low
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),  // CmdId high
+            0x41.toByte(),  // CommandType: ActionMovement (65 = 0x41)
+            deviceTableId,
+            deviceId,
+            command
+        )
+    }
+    
+    /**
+     * Build GetDevicesMetadata command
+     * Format: [ClientCommandId (2 bytes)][CommandType (2)][DeviceTableId (1)][StartDeviceId (1)][MaxDeviceRequestCount (1)]
+     */
+    fun buildGetDevicesMetadata(clientCommandId: UShort, deviceTableId: Byte, startDeviceId: Byte = 0.toByte(), maxDeviceCount: Byte = (-1).toByte()): ByteArray {
+        return byteArrayOf(
+            (clientCommandId.toInt() and 0xFF).toByte(),           // ClientCommandId LSB
+            ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),  // ClientCommandId MSB
+            0x02.toByte(),  // CommandType: GetDevicesMetadata
+            deviceTableId,
+            startDeviceId,
+            maxDeviceCount
+        )
+    }
+    
+    // H-Bridge command constants
+    object HBridgeCommand {
+        const val STOP: Byte = 0x00
+        const val FORWARD: Byte = 0x01      // Retract/Close
+        const val REVERSE: Byte = 0x02      // Extend/Open
+        const val CLEAR_FAULT: Byte = 0x03
+        const val HOME_RESET: Byte = 0x04
+        const val AUTO_FORWARD: Byte = 0x05
+        const val AUTO_REVERSE: Byte = 0x06
+    }
 }
 

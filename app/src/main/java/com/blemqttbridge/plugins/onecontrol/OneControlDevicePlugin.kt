@@ -15,6 +15,7 @@ import com.blemqttbridge.plugins.onecontrol.protocol.CobsByteDecoder
 import com.blemqttbridge.plugins.onecontrol.protocol.CobsDecoder
 import com.blemqttbridge.plugins.onecontrol.protocol.HomeAssistantMqttDiscovery
 import com.blemqttbridge.plugins.onecontrol.protocol.MyRvLinkCommandBuilder
+import com.blemqttbridge.plugins.onecontrol.protocol.FunctionNameMapper
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.*
@@ -250,7 +251,36 @@ class OneControlGattCallback(
     
     // Home Assistant discovery tracking - prevents duplicate discovery publishes
     private val haDiscoveryPublished = mutableSetOf<String>()
+
+    // Device metadata from GetDevicesMetadata response
+    data class DeviceMetadata(
+        val deviceTableId: Int,
+        val deviceId: Int,
+        val functionName: Int,
+        val functionInstance: Int,
+        val friendlyName: String
+    )
+    private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
+    private var metadataRequested = false
     
+    /**
+     * Get friendly name for a device, or fallback to hex ID
+     */
+    private fun getDeviceFriendlyName(tableId: Int, deviceId: Int, fallbackType: String): String {
+        val deviceAddr = (tableId shl 8) or deviceId
+        val metadata = deviceMetadata[deviceAddr]
+        val result = if (metadata != null && metadata.friendlyName.isNotEmpty() && !metadata.friendlyName.startsWith("Unknown")) {
+            metadata.friendlyName
+        } else {
+            "$fallbackType %04x".format(deviceAddr)
+        }
+        Log.d(TAG, "🏷️ getName($tableId:$deviceId): addr=0x%04x -> '$result'".format(deviceAddr))
+        return result
+    }
+
+    // Track pending commands by ID to match responses
+    private val pendingCommands = mutableMapOf<Int, Int>()
+
     // Dimmable light control tracking (from legacy app)
     // Key: "tableId:deviceId", Value: last known brightness (1-255)
     private val lastKnownDimmableBrightness = mutableMapOf<String, Int>()
@@ -694,6 +724,20 @@ class OneControlGattCallback(
             startHeartbeat()
         }, 500)
         
+        // Send GetDevicesMetadata to get friendly names - ALWAYS send, no guards
+        Log.i(TAG, "🔍 About to schedule GetDevicesMetadata timer for 1500ms")
+        val timerPosted = handler.postDelayed({
+            Log.i(TAG, "🔍 Timer fired: metadataRequested=$metadataRequested, isConnected=$isConnected, isAuthenticated=$isAuthenticated")
+            if (!metadataRequested) {
+                metadataRequested = true
+                Log.i(TAG, "🔍 Sending GetDevicesMetadata for friendly names (from timer)")
+                sendGetDevicesMetadataCommand()
+            } else {
+                Log.i(TAG, "🔍 metadataRequested already true - skipping (was sent from elsewhere)")
+            }
+        }, 1500)
+        Log.i(TAG, "🔍 Timer scheduled: result=$timerPosted")
+        
         // Publish ready state to MQTT
         mqttPublisher.publishState("onecontrol/${device.address}/status", "ready", true)
         
@@ -891,6 +935,7 @@ class OneControlGattCallback(
         
         // Try to decode as MyRvLink event first
         val eventType = decodedFrame[0].toInt() and 0xFF
+        Log.i(TAG, "📦 EVENT TYPE: 0x${eventType.toString(16).padStart(2, '0')} (${decodedFrame.size} bytes)")
         
         when (eventType) {
             0x01 -> {
@@ -899,9 +944,9 @@ class OneControlGattCallback(
                 handleGatewayInformationEvent(decodedFrame)
             }
             0x02 -> {
-                // DeviceCommand response - acknowledgment of commands sent
-                Log.d(TAG, "📦 DeviceCommand response (ack)")
-                // This is the gateway acknowledging our commands - typically nothing to do
+                // DeviceCommand response - GetDevices/GetDevicesMetadata responses
+                Log.i(TAG, "📦 DeviceCommand response (0x02)")
+                handleCommandResponse(decodedFrame)
             }
             0x03 -> {
                 // DeviceOnlineStatus
@@ -993,14 +1038,23 @@ class OneControlGattCallback(
     
     /**
      * Handle GatewayInformation event
+     * Format: [0x01][byte1][byte2][byte3][deviceTableId][...]
      */
     private fun handleGatewayInformationEvent(data: ByteArray) {
         Log.i(TAG, "📦 GatewayInformation: ${data.size} bytes")
         
-        if (data.size >= 2) {
-            deviceTableId = data[1]
+        if (data.size >= 5) {
+            // deviceTableId is at byte 4, not byte 1
+            deviceTableId = data[4]
             gatewayInfoReceived = true
-            Log.i(TAG, "📦 Device Table ID: 0x${deviceTableId.toString(16)}")
+            Log.i(TAG, "📦 Device Table ID: 0x${(deviceTableId.toInt() and 0xFF).toString(16)}")
+            
+            // Trigger GetDevicesMetadata if authenticated
+            if (isAuthenticated && !metadataRequested) {
+                metadataRequested = true
+                Log.i(TAG, "🔍 Triggering GetDevicesMetadata")
+                handler.postDelayed({ sendGetDevicesMetadataCommand() }, 500)
+            }
         }
         
         // Publish to MQTT
@@ -1055,9 +1109,10 @@ class OneControlGattCallback(
         // Publish HA discovery if not already done (uses full topic for discovery)
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "switch_$keyHex"
-        Log.d(TAG, "🔍 Relay discovery check: key=$discoveryKey, alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Switch")
+        Log.d(TAG, "🔍 Relay discovery check: key=$discoveryKey, name=$friendlyName, alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
         if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for switch $tableId:$deviceId")
+            Log.i(TAG, "📢 Publishing HA discovery for switch $tableId:$deviceId ($friendlyName)")
             try {
                 val deviceAddr = (tableId shl 8) or deviceId
                 // Discovery payload needs full topic paths (publishState adds prefix)
@@ -1065,7 +1120,7 @@ class OneControlGattCallback(
                 val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
                     gatewayMac = device.address,
                     deviceAddr = deviceAddr,
-                    deviceName = "Switch $keyHex",
+                    deviceName = friendlyName,
                     stateTopic = "$prefix/$stateTopic",
                     commandTopic = "$prefix/$commandTopic",
                     appVersion = "PluginBridge v2"
@@ -1143,15 +1198,16 @@ class OneControlGattCallback(
         // Publish HA discovery if not already done
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "light_$keyHex"
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Light")
         if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for dimmable light $tableId:$deviceId")
+            Log.i(TAG, "📢 Publishing HA discovery for dimmable light $tableId:$deviceId ($friendlyName)")
             val deviceAddr = (tableId shl 8) or deviceId
             // Discovery payload needs full topic paths
             val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
-                deviceName = "Light $keyHex",
+                deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
                 brightnessTopic = "$prefix/$brightnessTopic",
@@ -1205,13 +1261,14 @@ class OneControlGattCallback(
         // Publish HA discovery if not already done
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "tank_$keyHex"
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Tank")
         if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId")
+            Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId ($friendlyName)")
             // Discovery payload needs full topic path
             val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                 gatewayMac = device.address,
-                sensorName = "Tank $keyHex",
+                sensorName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 unit = "%",
                 deviceClass = null,
@@ -1296,8 +1353,9 @@ class OneControlGattCallback(
     
     /**
      * Handle H-Bridge status event (covers/slides/awnings)
-     * Format: eventType(0x0D/0x0E), tableId, deviceId, status
+     * Format: eventType(0x0D/0x0E), tableId, deviceId, status, position
      * Status: 0xC0=stopped, 0xC2=extending/opening, 0xC3=retracting/closing
+     * Position: 0-100 (percentage) or 0xFF if not supported
      */
     private fun handleHBridgeStatus(data: ByteArray) {
         if (data.size < 4) return
@@ -1305,12 +1363,13 @@ class OneControlGattCallback(
         val tableId = data[1].toInt() and 0xFF
         val deviceId = data[2].toInt() and 0xFF
         val status = data[3].toInt() and 0xFF
+        val position = if (data.size > 4) data[4].toInt() and 0xFF else 0xFF
         
-        Log.i(TAG, "📦 HBridge (cover) $tableId:$deviceId status=0x${status.toString(16)}")
+        Log.i(TAG, "📦 HBridge (cover) $tableId:$deviceId status=0x${status.toString(16)} position=$position (${data.size} bytes, raw=${data.joinToString(" ") { "%02X".format(it) }})")
         
         val baseTopic = "onecontrol/${device.address}"
         val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-        val commandTopic = "$baseTopic/command/cover/$tableId/$deviceId"
+        // No command topic - covers are state-only sensors for safety
         
         // Map status to HA cover state
         val haState = when (status) {
@@ -1320,23 +1379,26 @@ class OneControlGattCallback(
             else -> "unknown"
         }
         
-        // Publish HA discovery if not already done
+        // Publish HA discovery as STATE SENSOR (not controllable cover)
+        // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
+        // Motors rely on operator judgment - remote control is unsafe.
         val keyHex = "%02x%02x".format(tableId, deviceId)
-        val discoveryKey = "cover_$keyHex"
+        val discoveryKey = "cover_state_$keyHex"
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Cover")
+        Log.d(TAG, "🏷️ Cover discovery: tableId=$tableId, deviceId=$deviceId, key=$keyHex, name='$friendlyName'")
         if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for cover $tableId:$deviceId")
+            Log.i(TAG, "📢 Publishing HA discovery for cover STATE SENSOR $tableId:$deviceId ($friendlyName)")
             val deviceAddr = (tableId shl 8) or deviceId
             val prefix = mqttPublisher.topicPrefix
-            val discovery = HomeAssistantMqttDiscovery.getCoverDiscovery(
+            val discovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
-                deviceName = "Cover $keyHex",
+                deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
-                commandTopic = "$prefix/$commandTopic",
-                positionTopic = "$prefix/$baseTopic/device/$tableId/$deviceId/position",
                 appVersion = "PluginBridge v2"
             )
-            val discoveryTopic = "$prefix/cover/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_$keyHex/config"
+            // Publish as sensor, not cover
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
         
@@ -1425,13 +1487,14 @@ class OneControlGattCallback(
         // Publish HA discovery if not already done
         val keyHex = "%02x%02x".format(tableId, deviceId)
         val discoveryKey = "tank_$keyHex"
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Tank")
         if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for tank sensor V2 $tableId:$deviceId")
+            Log.i(TAG, "📢 Publishing HA discovery for tank sensor V2 $tableId:$deviceId ($friendlyName)")
             // Discovery payload needs full topic path
             val prefix = mqttPublisher.topicPrefix
             val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
                 gatewayMac = device.address,
-                sensorName = "Tank $keyHex",
+                sensorName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 unit = "%",
                 deviceClass = null,
@@ -1447,17 +1510,44 @@ class OneControlGattCallback(
     }
     
     /**
-     * Handle command response (GetDevices, etc.)
+     * Handle command response (GetDevices, GetDevicesMetadata)
      */
     private fun handleCommandResponse(data: ByteArray) {
-        val commandId = ((data[1].toInt() and 0xFF) shl 8) or (data[0].toInt() and 0xFF)
-        val commandType = data[2].toInt() and 0xFF
+        if (data.size < 4) {
+            Log.w(TAG, "📦 Response too short: ${data.size}")
+            return
+        }
         
-        Log.i(TAG, "📦 Command Response: ID=0x${commandId.toString(16)}, Type=0x${commandType.toString(16)}")
+        // Command ID is little-endian at bytes 1-2
+        val commandId = (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
+        val responseType = data[3].toInt() and 0xFF
+        val commandType = pendingCommands[commandId]
+        
+        val isSuccess = responseType == 0x01 || responseType == 0x81
+        val isComplete = responseType == 0x81 || responseType == 0x82
+        
+        Log.i(TAG, "📦 Response: cmdId=$commandId, respType=$responseType, cmdType=$commandType")
+        
+        if (commandType == null) {
+            Log.w(TAG, "📦 Unknown cmdId $commandId, trying to infer")
+            // Try to infer from data structure
+            if (data.size >= 8) {
+                val protocol = data[7].toInt() and 0xFF
+                val payloadSize = if (data.size > 8) data[8].toInt() and 0xFF else 0
+                if (protocol == 2 && payloadSize == 17) {
+                    Log.i(TAG, "📦 Inferred GetDevicesMetadata")
+                    handleGetDevicesMetadataResponse(data)
+                    return
+                }
+            }
+            return
+        }
+        
+        if (isComplete) pendingCommands.remove(commandId)
         
         when (commandType) {
             0x01 -> handleGetDevicesResponse(data)
-            0x02 -> Log.i(TAG, "📦 GetDevicesMetadata response")
+            0x02 -> handleGetDevicesMetadataResponse(data)
         }
     }
     
@@ -1474,6 +1564,157 @@ class OneControlGattCallback(
             put("raw", data.joinToString(" ") { "%02X".format(it) })
         }
         mqttPublisher.publishState("onecontrol/${device.address}/devices", json.toString(), true)
+    }
+    
+    /**
+     * Handle GetDevicesMetadata response - parses function names
+     * Format: [0x02][cmdIdLo][cmdIdHi][respType][tableId][startId][count][entries]
+     */
+    private fun handleGetDevicesMetadataResponse(data: ByteArray) {
+        if (data.size < 8) {
+            Log.w(TAG, "📋 Metadata response too short: ${data.size}")
+            return
+        }
+        
+        val tableId = data[4].toInt() and 0xFF
+        val startId = data[5].toInt() and 0xFF
+        val count = data[6].toInt() and 0xFF
+        
+        Log.i(TAG, "📋 Metadata: table=$tableId, start=$startId, count=$count")
+        
+        var offset = 7
+        var index = 0
+        
+        Log.d(TAG, "📋 Raw data: ${data.joinToString(" ") { "%02X".format(it) }}")
+        
+        while (index < count && offset + 2 < data.size) {
+            val protocol = data[offset].toInt() and 0xFF
+            val payloadSize = data[offset + 1].toInt() and 0xFF
+            val entrySize = payloadSize + 2
+            
+            Log.d(TAG, "📋 Entry $index @ offset=$offset: protocol=$protocol, payloadSize=$payloadSize")
+            
+            if (offset + entrySize > data.size) {
+                Log.w(TAG, "📋 Entry overflows data (need ${offset + entrySize}, have ${data.size})")
+                break
+            }
+            
+            val deviceId = (startId + index) and 0xFF
+            val deviceAddr = (tableId shl 8) or deviceId
+            
+            if (protocol == 2 && payloadSize == 17) {
+                // Function name is BIG-ENDIAN (high byte first)
+                val funcNameHi = data[offset + 2].toInt() and 0xFF
+                val funcNameLo = data[offset + 3].toInt() and 0xFF
+                val funcName = (funcNameHi shl 8) or funcNameLo
+                val funcInstance = data[offset + 4].toInt() and 0xFF
+                
+                val friendlyName = FunctionNameMapper.getFriendlyName(funcName, funcInstance)
+                
+                deviceMetadata[deviceAddr] = DeviceMetadata(
+                    deviceTableId = tableId,
+                    deviceId = deviceId,
+                    functionName = funcName,
+                    functionInstance = funcInstance,
+                    friendlyName = friendlyName
+                )
+                
+                Log.i(TAG, "📋 [$tableId:$deviceId] fn=$funcName ($friendlyName)")
+                
+                // Publish metadata to MQTT
+                val json = JSONObject()
+                json.put("device_table_id", tableId)
+                json.put("device_id", deviceId)
+                json.put("function_name", funcName)
+                json.put("function_instance", funcInstance)
+                json.put("friendly_name", friendlyName)
+                mqttPublisher.publishState(
+                    "onecontrol/${device.address}/device/$tableId/$deviceId/metadata",
+                    json.toString(), true
+                )
+                
+                // Re-publish HA discovery with friendly name
+                republishDiscoveryWithFriendlyName(tableId, deviceId, friendlyName)
+            }
+            
+            offset += entrySize
+            index++
+        }
+        
+        Log.i(TAG, "📋 Parsed $index entries, ${deviceMetadata.size} total")
+    }
+    
+    /**
+     * Re-publish HA discovery with friendly name
+     */
+    private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, friendlyName: String) {
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val deviceAddr = (tableId shl 8) or deviceId
+        val prefix = mqttPublisher.topicPrefix
+        val baseTopic = "onecontrol/${device.address}"
+        
+        if (haDiscoveryPublished.contains("switch_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub switch: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
+            val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        if (haDiscoveryPublished.contains("light_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub light: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
+            val commandTopic = "$baseTopic/command/light/$tableId/$deviceId"
+            val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                brightnessTopic = "$prefix/$brightnessTopic",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        if (haDiscoveryPublished.contains("tank_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub tank: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+            val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+                gatewayMac = device.address,
+                sensorName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                unit = "%",
+                icon = "mdi:gauge",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
+        
+        if (haDiscoveryPublished.contains("cover_state_$keyHex")) {
+            Log.i(TAG, "📢 Re-pub cover state sensor: $friendlyName")
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val discovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                appVersion = "PluginBridge v2"
+            )
+            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
+            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+        }
     }
     
     /**
@@ -1540,6 +1781,9 @@ class OneControlGattCallback(
             val effectiveTableId = if (deviceTableId == 0x00.toByte()) DEFAULT_DEVICE_TABLE_ID else deviceTableId
             val command = encodeGetDevicesCommand(commandId, effectiveTableId)
             
+            // Track pending command
+            pendingCommands[commandId.toInt()] = 0x01
+            
             Log.d(TAG, "📤 GetDevices: CommandId=0x${commandId.toString(16)}, TableId=0x${effectiveTableId.toString(16)}")
             
             val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
@@ -1552,6 +1796,46 @@ class OneControlGattCallback(
             Log.i(TAG, "📤 Sent GetDevices command: result=$result")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send command: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Send GetDevicesMetadata command to get function names
+     */
+    private fun sendGetDevicesMetadataCommand() {
+        Log.i(TAG, "🔍 sendGetDevicesMetadataCommand()")
+        
+        if (!isConnected || currentGatt == null) {
+            Log.w(TAG, "🔍 Cannot send - not connected")
+            return
+        }
+        
+        val writeChar = dataWriteChar
+        if (writeChar == null) {
+            Log.w(TAG, "🔍 No write characteristic")
+            return
+        }
+        
+        try {
+            val commandId = getNextCommandId()
+            val tableId = if (deviceTableId != 0x00.toByte()) deviceTableId else DEFAULT_DEVICE_TABLE_ID
+            val command = encodeGetDevicesMetadataCommand(commandId, tableId)
+            
+            // Track pending command
+            pendingCommands[commandId.toInt()] = 0x02
+            
+            Log.i(TAG, "🔍 GetDevicesMetadata: cmdId=$commandId, tableId=${tableId.toInt() and 0xFF}")
+            
+            val encoded = CobsDecoder.encode(command, prependStartFrame = true, useCrc = true)
+            Log.i(TAG, "🔍 Encoded: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "🔍 Sent GetDevicesMetadata: result=$result")
+        } catch (e: Exception) {
+            Log.e(TAG, "🔍 Failed: ${e.message}", e)
         }
     }
     
@@ -1607,6 +1891,13 @@ class OneControlGattCallback(
                     // On/Off or brightness command
                     controlDimmableLight(tableId.toByte(), deviceId.toByte(), payload)
                 }
+            }
+            // SAFETY: Cover control disabled - RV awnings/slides have no limit switches
+            // or overcurrent protection. Motors rely on operator judgment.
+            // "cover" -> controlCover(tableId.toByte(), deviceId.toByte(), payload)
+            "cover" -> {
+                Log.w(TAG, "⚠️ Cover control is disabled for safety - use physical controls")
+                Result.failure(Exception("Cover control disabled for safety"))
             }
             else -> {
                 Log.w(TAG, "⚠️ Unknown command type: $kind")
@@ -1790,6 +2081,77 @@ class OneControlGattCallback(
         }
     }
     
+    /*
+     * DISABLED FOR SAFETY: Cover control removed.
+     * RV awnings and slides have NO limit switches and NO overcurrent protection.
+     * Testing confirmed motors will continue drawing 19A (awning) / 39A (slide) at
+     * mechanical limits with no auto-cutoff - relies entirely on operator judgment.
+     * 
+     * Control a cover (slide/awning) using H-Bridge command
+     * Payload: "OPEN", "CLOSE", "STOP"
+     * 
+     * Using momentary FORWARD/REVERSE commands.
+     * REVERSE = Extend/Open (motor runs in reverse direction)
+     * FORWARD = Retract/Close (motor runs in forward direction)
+     */
+    @Suppress("unused")
+    private fun controlCoverDISABLED(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+        val command = when (payload.uppercase()) {
+            "OPEN" -> MyRvLinkCommandBuilder.HBridgeCommand.REVERSE     // Extend/Open
+            "CLOSE" -> MyRvLinkCommandBuilder.HBridgeCommand.FORWARD    // Retract/Close
+            "STOP" -> MyRvLinkCommandBuilder.HBridgeCommand.STOP
+            else -> {
+                Log.w(TAG, "⚠️ Unknown cover command: $payload")
+                return Result.failure(Exception("Unknown cover command: $payload"))
+            }
+        }
+        
+        Log.i(TAG, "📤 Cover control: table=$tableId, device=$deviceId, action=$payload (cmd=0x${command.toString(16)})")
+        
+        val writeChar = dataWriteChar ?: return Result.failure(Exception("No write characteristic"))
+        
+        try {
+            val commandId = getNextCommandId()
+            val effectiveTableId = if (tableId == 0x00.toByte() && deviceTableId != 0x00.toByte()) {
+                deviceTableId
+            } else {
+                tableId
+            }
+            
+            val bleCommand = MyRvLinkCommandBuilder.buildActionHBridge(
+                clientCommandId = commandId,
+                deviceTableId = effectiveTableId,
+                deviceId = deviceId,
+                command = command
+            )
+            
+            val encoded = CobsDecoder.encode(bleCommand, prependStartFrame = true, useCrc = true)
+            Log.d(TAG, "📤 Cover command: ${encoded.joinToString(" ") { "%02X".format(it) }}")
+            
+            writeChar.value = encoded
+            writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            val result = currentGatt?.writeCharacteristic(writeChar)
+            
+            Log.i(TAG, "📤 Sent cover command: table=${effectiveTableId.toInt() and 0xFF}, device=${deviceId.toInt() and 0xFF}, action=$payload, result=$result")
+            
+            // Publish optimistic state update
+            val baseTopic = "onecontrol/${device.address}"
+            val optimisticState = when (payload.uppercase()) {
+                "OPEN" -> "opening"
+                "CLOSE" -> "closing"
+                "STOP" -> "stopped"
+                else -> "unknown"
+            }
+            mqttPublisher.publishState("$baseTopic/device/${effectiveTableId.toInt() and 0xFF}/${deviceId.toInt() and 0xFF}/state", 
+                optimisticState, true)
+            
+            return if (result == true) Result.success(Unit) else Result.failure(Exception("Write failed"))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send cover command: ${e.message}", e)
+            return Result.failure(e)
+        }
+    }
+    
     // ========== END COMMAND HANDLING ==========
     
     /**
@@ -1800,6 +2162,20 @@ class OneControlGattCallback(
             (commandId.toInt() and 0xFF).toByte(),
             ((commandId.toInt() shr 8) and 0xFF).toByte(),
             0x01.toByte(),  // CommandType: GetDevices
+            deviceTableId,
+            0x00.toByte(),  // StartDeviceId
+            0xFF.toByte()   // MaxDeviceRequestCount
+        )
+    }
+    
+    /**
+     * Encode GetDevicesMetadata command
+     */
+    private fun encodeGetDevicesMetadataCommand(commandId: UShort, deviceTableId: Byte): ByteArray {
+        return byteArrayOf(
+            (commandId.toInt() and 0xFF).toByte(),
+            ((commandId.toInt() shr 8) and 0xFF).toByte(),
+            0x02.toByte(),  // CommandType: GetDevicesMetadata
             deviceTableId,
             0x00.toByte(),  // StartDeviceId
             0xFF.toByte()   // MaxDeviceRequestCount

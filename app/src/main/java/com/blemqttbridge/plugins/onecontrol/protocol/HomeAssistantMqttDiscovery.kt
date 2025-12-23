@@ -120,6 +120,7 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         stateTopic: String,
         commandTopic: String,
+        attributesTopic: String? = null,
         appVersion: String? = null
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_switch_${deviceAddr.toString(16)}"
@@ -135,6 +136,11 @@ object HomeAssistantMqttDiscovery {
             put("state_topic", stateTopic)
             put("command_topic", commandTopic)
             
+            // Attributes (DTC codes, fault status, current draw)
+            if (attributesTopic != null) {
+                put("json_attributes_topic", attributesTopic)
+            }
+            
             // Payloads
             put("payload_on", "ON")
             put("payload_off", "OFF")
@@ -147,6 +153,21 @@ object HomeAssistantMqttDiscovery {
     
     /**
      * Generate discovery config for a cover (slide/awning)
+     * Note: Position is not supported for momentary H-Bridge devices (always 0xFF)
+     */
+    /**
+     * Generate discovery config for a cover (awning, slide-out, etc.)
+     * 
+     * SAFETY NOTE: RV awnings and slides typically lack limit switches on the extend direction.
+     * Extending too far can damage the awning (fabric rolls wrong way) or slide mechanism.
+     * However, RETRACTING is safe because:
+     * - Physical stop when fully retracted (hits the RV body)
+     * - Controller auto-stops via current spike detection
+     * 
+     * By default, only CLOSE (retract) and STOP commands are enabled.
+     * Set retractOnly=false to enable OPEN (extend) - USE WITH CAUTION.
+     * 
+     * @param retractOnly If true (default), only CLOSE and STOP are available. OPEN is disabled.
      */
     fun getCoverDiscovery(
         gatewayMac: String,
@@ -154,8 +175,9 @@ object HomeAssistantMqttDiscovery {
         deviceName: String,
         stateTopic: String,
         commandTopic: String,
-        positionTopic: String,
-        appVersion: String? = null
+        attributesTopic: String? = null,
+        appVersion: String? = null,
+        retractOnly: Boolean = true
     ): JSONObject {
         val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_cover_${deviceAddr.toString(16)}"
         val objectId = "cover_${deviceAddr.toString(16).padStart(4, '0')}"
@@ -170,16 +192,63 @@ object HomeAssistantMqttDiscovery {
             put("state_topic", stateTopic)
             put("command_topic", commandTopic)
             
-            // Position
-            put("position_topic", positionTopic)
-            put("set_position_topic", "${positionTopic}/set")
+            // Attributes (hazard flags, fault status)
+            if (attributesTopic != null) {
+                put("json_attributes_topic", attributesTopic)
+            }
             
-            // Payloads
-            put("payload_open", "OPEN")
+            // Payloads - CLOSE and STOP always available
             put("payload_close", "CLOSE")
             put("payload_stop", "STOP")
             
-            // Icon
+            // OPEN is dangerous for awnings/slides without limit switches
+            // Only enable if explicitly requested
+            if (!retractOnly) {
+                put("payload_open", "OPEN")
+            }
+            // Note: Not including payload_open disables the open button in HA
+            
+            // State values
+            put("state_open", "open")
+            put("state_opening", "opening")
+            put("state_closed", "closed")
+            put("state_closing", "closing")
+            put("state_stopped", "stopped")
+            
+            // Icon based on mode
+            put("icon", if (retractOnly) "mdi:arrow-collapse-horizontal" else "mdi:window-shutter")
+        }
+    }
+    
+    /**
+     * Generate discovery config for a cover STATE SENSOR (state-only, no control)
+     * 
+     * SAFETY NOTE: RV awnings and slides have no limit switches or overcurrent protection.
+     * The motors rely entirely on operator judgment to avoid damage.
+     * Therefore, we expose these as state-only sensors rather than controllable covers.
+     * 
+     * States: open, opening, closed, closing, stopped
+     */
+    fun getCoverStateSensorDiscovery(
+        gatewayMac: String,
+        deviceAddr: Int,
+        deviceName: String,
+        stateTopic: String,
+        appVersion: String? = null
+    ): JSONObject {
+        val uniqueId = "onecontrol_ble_${gatewayMac.replace(":", "")}_cover_state_${deviceAddr.toString(16)}"
+        val objectId = "cover_state_${deviceAddr.toString(16).padStart(4, '0')}"
+        
+        return JSONObject().apply {
+            put("unique_id", uniqueId)
+            put("name", deviceName)
+            put("default_entity_id", "sensor.$objectId")
+            put("device", getDeviceInfo(gatewayMac, appVersion))
+            
+            // State only - no commands
+            put("state_topic", stateTopic)
+            
+            // Icon shows awning/slide
             put("icon", "mdi:window-shutter")
         }
     }
