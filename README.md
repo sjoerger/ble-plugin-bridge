@@ -56,14 +56,14 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 2. **Pair via Android Bluetooth Settings:**
    - Go to Android **Settings → Bluetooth**
    - Ensure Bluetooth is ON
-   - The gateway should appear as "OneControl" or similar
-   - Tap to pair - enter your gateway PIN if prompted
+   - The gateway should appear with a name starting with "LCI..."
+   - Tap to pair - enter your gateway PIN if prompted (this is unlikely, it should just pair)
    - Wait for "Paired" status to appear
 
 3. **Configure the plugin:**
-   - In the BLE-MQTT Bridge app, expand "Gateway Settings"
+   - In the BLE-MQTT Bridge app, expand "Gateway Settings" under the OneControl plugin
    - Enter the **Gateway MAC Address** (found in Bluetooth settings after pairing)
-   - Enter your **Gateway PIN** (same PIN used in the official OneControl app)
+   - Enter your **Gateway PIN** (found on a sticker on your OneControl board)
 
 4. **Enable the plugin:**
    - Turn ON the **OneControl** toggle
@@ -92,7 +92,7 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 
 ### BLE Scanner Plugin
 
-A utility plugin that scans for nearby BLE devices and publishes results to MQTT.
+A utility plugin that scans for nearby BLE devices and publishes results to MQTT. This is not needed for anything else to function, but was added as a proof of concept for supporting multiple BLE connected plugins and might be useful, so I left it in.
 
 #### Use Cases
 
