@@ -11,14 +11,34 @@ android {
         applicationId = "com.blemqttbridge"
         minSdk = 26  // Android 8.0
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0-phase2"
+        versionCode = 2
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            val storeFilePath = findProperty("ONECONTROL_STORE_FILE") as? String
+            val storePass = findProperty("ONECONTROL_STORE_PASSWORD") as? String
+            val alias = findProperty("ONECONTROL_KEY_ALIAS") as? String
+            val keyPass = findProperty("ONECONTROL_KEY_PASSWORD") as? String
+            
+            if (storeFilePath != null && storePass != null && alias != null && keyPass != null) {
+                storeFile = file(storeFilePath)
+                storePassword = storePass
+                keyAlias = alias
+                keyPassword = keyPass
+            }
+        }
+    }
+
     buildTypes {
         release {
+            val releaseSigningConfig = signingConfigs.findByName("release")
+            if (releaseSigningConfig?.storeFile != null) {
+                signingConfig = releaseSigningConfig
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
