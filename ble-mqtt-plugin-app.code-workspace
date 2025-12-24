@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "../EasyTouch"
+		},
+		{
+			"path": "../android_ble_bridge"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../.gradle"
+		}
+	],
+	"settings": {
+		"java.compile.nullAnalysis.mode": "automatic",
+		"java.configuration.updateBuildConfiguration": "interactive"
+	}
+}

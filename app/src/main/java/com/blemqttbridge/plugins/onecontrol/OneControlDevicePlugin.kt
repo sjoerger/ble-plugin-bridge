@@ -1049,10 +1049,19 @@ class OneControlGattCallback(
             gatewayInfoReceived = true
             Log.i(TAG, "📦 Device Table ID: 0x${(deviceTableId.toInt() and 0xFF).toString(16)}")
             
-            // Trigger GetDevicesMetadata if authenticated
-            if (isAuthenticated && !metadataRequested) {
+            // If we're receiving GatewayInformation, we ARE authenticated (data is flowing)
+            // Set isAuthenticated if not already set (fixes race condition where
+            // onAllNotificationsSubscribed never fires due to descriptor write issues)
+            if (!isAuthenticated) {
+                Log.i(TAG, "✅ Setting isAuthenticated=true (receiving data proves auth)")
+                isAuthenticated = true
+                mqttPublisher.updateBleStatus(connected = true, paired = true)
+            }
+            
+            // Trigger GetDevicesMetadata for friendly names
+            if (!metadataRequested) {
                 metadataRequested = true
-                Log.i(TAG, "🔍 Triggering GetDevicesMetadata")
+                Log.i(TAG, "🔍 Triggering GetDevicesMetadata from GatewayInformation")
                 handler.postDelayed({ sendGetDevicesMetadataCommand() }, 500)
             }
         }
@@ -1653,6 +1662,8 @@ class OneControlGattCallback(
         val prefix = mqttPublisher.topicPrefix
         val baseTopic = "onecontrol/${device.address}"
         
+        Log.d(TAG, "🔍 Republish check for $tableId:$deviceId ($friendlyName) - published set: ${haDiscoveryPublished.filter { it.contains(keyHex) }}")
+        
         if (haDiscoveryPublished.contains("switch_$keyHex")) {
             Log.i(TAG, "📢 Re-pub switch: $friendlyName")
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
@@ -1673,7 +1684,7 @@ class OneControlGattCallback(
             Log.i(TAG, "📢 Re-pub light: $friendlyName")
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
             val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
-            val commandTopic = "$baseTopic/command/light/$tableId/$deviceId"
+            val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
             val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
