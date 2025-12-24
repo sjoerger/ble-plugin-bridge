@@ -67,6 +67,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _mqttConnectedStatus = MutableStateFlow(BaseBleService.serviceRunning.value && BaseBleService.mqttConnected.value)
     val mqttConnectedStatus: StateFlow<Boolean> = _mqttConnectedStatus
     
+    // Trace status flows
+    private val _traceActive = MutableStateFlow(BaseBleService.traceActive.value)
+    val traceActive: StateFlow<Boolean> = _traceActive
+    
+    private val _traceFilePath = MutableStateFlow(BaseBleService.traceFilePath.value)
+    val traceFilePath: StateFlow<String?> = _traceFilePath
+    
     init {
         // Collect status updates from the service companion object
         // All status indicators are gated by serviceRunning
@@ -101,6 +108,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             BaseBleService.mqttConnected.collect { 
                 android.util.Log.i("SettingsViewModel", "MQTT status updated: $it (service running: ${_serviceRunningStatus.value})")
                 _mqttConnectedStatus.value = _serviceRunningStatus.value && it 
+            }
+        }
+        
+        // Collect trace status updates from the service
+        viewModelScope.launch {
+            BaseBleService.traceActive.collect { 
+                _traceActive.value = it 
+            }
+        }
+        viewModelScope.launch {
+            BaseBleService.traceFilePath.collect { 
+                _traceFilePath.value = it 
             }
         }
         
@@ -232,6 +251,52 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             kotlinx.coroutines.delay(500)
             startService()
+        }
+    }
+    
+    /**
+     * Export debug log and share via intent.
+     * Creates a debug log file and opens a share sheet for the user to share it.
+     */
+    fun exportDebugLog() {
+        viewModelScope.launch {
+            try {
+                // Get the service instance via broadcast intent
+                val intent = Intent(context, BaseBleService::class.java).apply {
+                    action = "com.blemqttbridge.EXPORT_DEBUG_LOG"
+                }
+                context.startService(intent)
+                
+                // Note: The actual file export and sharing needs to be done by the service
+                // since we need access to the service instance
+                android.util.Log.i("SettingsViewModel", "Debug log export requested")
+            } catch (e: Exception) {
+                android.util.Log.e("SettingsViewModel", "Failed to export debug log", e)
+            }
+        }
+    }
+    
+    /**
+     * Toggle BLE trace logging.
+     * Starts or stops BLE trace based on current state.
+     */
+    fun toggleBleTrace() {
+        viewModelScope.launch {
+            try {
+                val action = if (_traceActive.value) {
+                    "com.blemqttbridge.STOP_TRACE"
+                } else {
+                    "com.blemqttbridge.START_TRACE"
+                }
+                val intent = Intent(context, BaseBleService::class.java).apply {
+                    this.action = action
+                }
+                context.startService(intent)
+                
+                android.util.Log.i("SettingsViewModel", "BLE trace toggle requested: ${if (_traceActive.value) "stop" else "start"}")
+            } catch (e: Exception) {
+                android.util.Log.e("SettingsViewModel", "Failed to toggle BLE trace", e)
+            }
         }
     }
 }

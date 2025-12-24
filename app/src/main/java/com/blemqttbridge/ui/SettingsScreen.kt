@@ -527,6 +527,64 @@ fun SettingsScreen(
                     }
                 }
             }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
+            // Diagnostics Section
+            SectionHeader("Diagnostics")
+            
+            // Debug Log Export
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { viewModel.exportDebugLog() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    Text("Export Debug Log", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            
+            // BLE Trace Toggle
+            val traceActive by viewModel.traceActive.collectAsState()
+            val traceFilePath by viewModel.traceFilePath.collectAsState()
+            
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(6.dp)) {
+                    OutlinedButton(
+                        onClick = { viewModel.toggleBleTrace() },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = if (traceActive) "Stop Trace & Send" else "Start BLE Trace",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    
+                    // Trace status indicator
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = when {
+                            traceActive -> "Trace: active"
+                            traceFilePath != null -> "Trace: saved to $traceFilePath"
+                            else -> "Trace: inactive"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                }
+            }
         }
     }
 }

@@ -37,11 +37,19 @@ class BaseBleService : Service() {
         const val ACTION_STOP_SCAN = "com.blemqttbridge.STOP_SCAN"
         const val ACTION_STOP_SERVICE = "com.blemqttbridge.STOP_SERVICE"
         const val ACTION_DISCONNECT = "com.blemqttbridge.DISCONNECT"
+        const val ACTION_EXPORT_DEBUG_LOG = "com.blemqttbridge.EXPORT_DEBUG_LOG"
+        const val ACTION_START_TRACE = "com.blemqttbridge.START_TRACE"
+        const val ACTION_STOP_TRACE = "com.blemqttbridge.STOP_TRACE"
         
         const val EXTRA_BLE_PLUGIN_ID = "ble_plugin_id"
         const val EXTRA_OUTPUT_PLUGIN_ID = "output_plugin_id"
         const val EXTRA_BLE_CONFIG = "ble_config"
         const val EXTRA_OUTPUT_CONFIG = "output_config"
+        
+        // Debug and trace limits
+        private const val MAX_DEBUG_LOG_LINES = 2000
+        private const val TRACE_MAX_BYTES = 10 * 1024 * 1024  // 10 MB
+        private const val TRACE_MAX_DURATION_MS = 10 * 60 * 1000L  // 10 minutes
         
         // Service status StateFlows for UI observation
         private val _serviceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
@@ -58,6 +66,13 @@ class BaseBleService : Service() {
         
         private val _mqttConnected = kotlinx.coroutines.flow.MutableStateFlow(false)
         val mqttConnected: kotlinx.coroutines.flow.StateFlow<Boolean> = _mqttConnected
+        
+        // Trace status StateFlows for UI observation
+        private val _traceActive = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val traceActive: kotlinx.coroutines.flow.StateFlow<Boolean> = _traceActive
+        
+        private val _traceFilePath = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+        val traceFilePath: kotlinx.coroutines.flow.StateFlow<String?> = _traceFilePath
     }
     
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -87,6 +102,16 @@ class BaseBleService : Service() {
     private val pendingBondDevices = mutableSetOf<String>()
     
     private var isScanning = false
+    
+    // Debug logging and trace
+    private val debugLogBuffer = ArrayDeque<String>()
+    private var traceEnabled = false
+    private var traceWriter: java.io.BufferedWriter? = null
+    private var traceFile: java.io.File? = null
+    private var traceBytes: Long = 0
+    private var traceStartedAt: Long = 0
+    private var traceTimeout: Runnable? = null
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     
     /**
      * MQTT Publisher implementation for plugins.
@@ -226,6 +251,33 @@ class BaseBleService : Service() {
             
             ACTION_DISCONNECT -> {
                 disconnectAll()
+            }
+            
+            ACTION_EXPORT_DEBUG_LOG -> {
+                val file = exportDebugLog()
+                if (file != null && file.exists()) {
+                    shareFile(file, "text/plain")
+                } else {
+                    android.widget.Toast.makeText(this, "Could not create debug log", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            
+            ACTION_START_TRACE -> {
+                val file = startBleTrace()
+                if (file != null) {
+                    android.widget.Toast.makeText(this, "Trace started", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    android.widget.Toast.makeText(this, "Failed to start trace", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            
+            ACTION_STOP_TRACE -> {
+                val file = stopBleTrace("user stop")
+                if (file != null && file.exists()) {
+                    shareFile(file, "text/plain")
+                } else {
+                    android.widget.Toast.makeText(this, "Trace stopped (no file created)", android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
         }
         
@@ -1431,6 +1483,166 @@ class BaseBleService : Service() {
         override fun hasService(uuid: String): Boolean {
             val targetUuid = UUID.fromString(uuid)
             return gatt.services.any { it.uuid == targetUuid }
+        }
+    }
+    
+    // =====================================================================
+    // Debug Logging and Trace Functions
+    // =====================================================================
+    
+    /**
+     * Append a message to the debug log buffer (limited to MAX_DEBUG_LOG_LINES).
+     * Automatically mirrors to trace file if trace is active.
+     */
+    private fun appendDebugLog(message: String) {
+        val ts = System.currentTimeMillis()
+        val formatted = "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(ts))} - $message"
+        debugLogBuffer.addLast(formatted)
+        while (debugLogBuffer.size > MAX_DEBUG_LOG_LINES) {
+            debugLogBuffer.removeFirst()
+        }
+        logTrace(message) // mirror into trace if enabled
+    }
+    
+    /**
+     * Write a message to the trace file if tracing is enabled.
+     * Automatically stops trace if size limit is reached.
+     */
+    private fun logTrace(message: String) {
+        if (!traceEnabled) return
+        try {
+            val writer = traceWriter ?: return
+            val line = "${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())} $message\n"
+            writer.write(line)
+            writer.flush()
+            traceBytes += line.toByteArray().size
+            if (traceBytes >= TRACE_MAX_BYTES) {
+                stopBleTrace("size limit reached")
+            }
+        } catch (_: Exception) {
+            stopBleTrace("trace write error")
+        }
+    }
+    
+    /**
+     * Start BLE trace logging to a file.
+     * Creates a trace file with timestamp and starts recording all BLE events.
+     * Returns the trace file if successful, null otherwise.
+     */
+    fun startBleTrace(): java.io.File? {
+        try {
+            val dir = java.io.File(getExternalFilesDir(null), "traces")
+            if (!dir.exists()) dir.mkdirs()
+            val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+            val file = java.io.File(dir, "trace_${ts}.log")
+            traceWriter = file.bufferedWriter()
+            traceFile = file
+            traceBytes = 0
+            traceStartedAt = System.currentTimeMillis()
+            traceEnabled = true
+            traceTimeout?.let { handler.removeCallbacks(it) }
+            traceTimeout = Runnable {
+                stopBleTrace("time limit reached")
+            }.also { handler.postDelayed(it, TRACE_MAX_DURATION_MS) }
+            logTrace("TRACE START ts=$ts")
+            _traceActive.value = true
+            _traceFilePath.value = file.absolutePath
+            Log.i(TAG, "🔍 BLE trace started: ${file.absolutePath}")
+            return file
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start trace: ${e.message}")
+            stopBleTrace("error")
+            return null
+        }
+    }
+    
+    /**
+     * Stop BLE trace logging.
+     * Flushes and closes the trace file.
+     * Returns the trace file if it exists, null otherwise.
+     */
+    fun stopBleTrace(reason: String = "stopped"): java.io.File? {
+        if (!traceEnabled) return traceFile
+        logTrace("TRACE STOP reason=$reason")
+        traceTimeout?.let { handler.removeCallbacks(it) }
+        traceTimeout = null
+        traceEnabled = false
+        try {
+            traceWriter?.flush()
+            traceWriter?.close()
+        } catch (_: Exception) {}
+        traceWriter = null
+        _traceActive.value = false
+        if (traceFile != null) {
+            _traceFilePath.value = traceFile!!.absolutePath
+            Log.i(TAG, "🔍 BLE trace stopped: ${traceFile!!.absolutePath}")
+        }
+        return traceFile
+    }
+    
+    /**
+     * Check if BLE trace is currently active.
+     */
+    fun isTraceActive(): Boolean = traceEnabled
+    
+    /**
+     * Export debug log to a file.
+     * Creates a debug log file with all buffered log entries and system information.
+     * Returns the debug log file if successful, null otherwise.
+     */
+    fun exportDebugLog(): java.io.File? {
+        return try {
+            val dir = java.io.File(getExternalFilesDir(null), "logs")
+            if (!dir.exists()) dir.mkdirs()
+            val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+            val file = java.io.File(dir, "debug_${ts}.txt")
+            file.bufferedWriter().use { out ->
+                out.appendLine("BLE-MQTT Plugin Bridge debug log")
+                out.appendLine("Timestamp: $ts")
+                out.appendLine("Service running: ${_serviceRunning.value}")
+                out.appendLine("BLE connected: ${_bleConnected.value}")
+                out.appendLine("Device paired: ${_devicePaired.value}")
+                out.appendLine("Data healthy: ${_dataHealthy.value}")
+                out.appendLine("MQTT connected: ${_mqttConnected.value}")
+                out.appendLine("Trace active: $traceEnabled")
+                traceFile?.let { out.appendLine("Trace file: ${it.absolutePath}") }
+                out.appendLine("Active plugins:")
+                blePlugin?.let { out.appendLine("  - BLE: ${it.javaClass.simpleName}") }
+                outputPlugin?.let { out.appendLine("  - Output: ${it.javaClass.simpleName}") }
+                out.appendLine("")
+                out.appendLine("Recent events:")
+                debugLogBuffer.forEach { line -> out.appendLine(line) }
+            }
+            Log.i(TAG, "📝 Debug log exported: ${file.absolutePath}")
+            file
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write debug log: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Share a file via Android share intent.
+     * Uses FileProvider to grant temporary read access to the file.
+     */
+    private fun shareFile(file: java.io.File, mimeType: String) {
+        try {
+            val uri: android.net.Uri = androidx.core.content.FileProvider.getUriForFile(
+                this, 
+                "${packageName}.fileprovider", 
+                file
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(Intent.createChooser(intent, "Share log").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            Log.i(TAG, "📤 File share intent launched: ${file.name}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to share file: ${e.message}", e)
+            android.widget.Toast.makeText(this, "Failed to share file: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
         }
     }
 }
