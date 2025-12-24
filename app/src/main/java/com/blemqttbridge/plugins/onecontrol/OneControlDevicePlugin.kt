@@ -301,6 +301,75 @@ class OneControlGattCallback(
         return result
     }
 
+    /**
+     * Entity types for centralized state publishing
+     */
+    enum class EntityType(val haComponent: String, val topicPrefix: String) {
+        SWITCH("switch", "switch"),
+        LIGHT("light", "light"),
+        COVER_SENSOR("sensor", "cover_state"),  // Cover as state sensor for safety
+        TANK_SENSOR("sensor", "tank"),
+        SYSTEM_SENSOR("sensor", "system")
+    }
+
+    /**
+     * Centralized method to publish entity state and discovery.
+     * All entity handlers should call this to ensure consistent behavior.
+     * 
+     * @param entityType The type of entity (determines discovery topic structure)
+     * @param tableId Device table ID
+     * @param deviceId Device ID within table
+     * @param discoveryKey Unique key for tracking discovery (e.g., "switch_0809")
+     * @param state Map of state values to publish (e.g., {"state" to "ON", "brightness" to "128"})
+     * @param discoveryProvider Lambda that returns the discovery JSON payload
+     */
+    private fun publishEntityState(
+        entityType: EntityType,
+        tableId: Int,
+        deviceId: Int,
+        discoveryKey: String,
+        state: Map<String, String>,
+        discoveryProvider: (friendlyName: String, deviceAddr: Int, prefix: String, baseTopic: String) -> JSONObject
+    ) {
+        val baseTopic = "onecontrol/${device.address}"
+        val prefix = mqttPublisher.topicPrefix
+        val keyHex = "%02x%02x".format(tableId, deviceId)
+        val deviceAddr = (tableId shl 8) or deviceId
+        
+        // Determine fallback type from entity type
+        val fallbackType = when (entityType) {
+            EntityType.SWITCH -> "Switch"
+            EntityType.LIGHT -> "Light"
+            EntityType.COVER_SENSOR -> "Cover"
+            EntityType.TANK_SENSOR -> "Tank"
+            EntityType.SYSTEM_SENSOR -> "Sensor"
+        }
+        val friendlyName = getDeviceFriendlyName(tableId, deviceId, fallbackType)
+        
+        // Publish HA discovery if not already done
+        if (haDiscoveryPublished.add(discoveryKey)) {
+            Log.i(TAG, "📢 Publishing HA discovery for $entityType $tableId:$deviceId ($friendlyName)")
+            try {
+                val discovery = discoveryProvider(friendlyName, deviceAddr, prefix, baseTopic)
+                val macForTopic = device.address.replace(":", "").lowercase()
+                val discoveryTopic = "$prefix/${entityType.haComponent}/onecontrol_ble_$macForTopic/${entityType.topicPrefix}_$keyHex/config"
+                Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
+                mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
+                Log.d(TAG, "📢 Discovery published successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "📢 Discovery publish failed: ${e.message}", e)
+                // Remove from set so we can retry
+                haDiscoveryPublished.remove(discoveryKey)
+            }
+        }
+        
+        // Publish state values
+        state.forEach { (suffix, value) ->
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/$suffix"
+            mqttPublisher.publishState(stateTopic, value, true)
+        }
+    }
+
     // Track pending commands by ID to match responses
     private val pendingCommands = mutableMapOf<Int, Int>()
 
@@ -1168,42 +1237,25 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📦 Relay $tableId:$deviceId statusByte=0x%02X rawOutput=0x%02X state=$isOn".format(statusByte, rawOutputState))
         
-        // Topic paths - publishState adds prefix, so use relative paths
-        val baseTopic = "onecontrol/${device.address}"
-        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-        val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
-        
-        // Publish HA discovery if not already done (uses full topic for discovery)
         val keyHex = "%02x%02x".format(tableId, deviceId)
-        val discoveryKey = "switch_$keyHex"
-        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Switch")
-        Log.d(TAG, "🔍 Relay discovery check: key=$discoveryKey, name=$friendlyName, alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
-        if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for switch $tableId:$deviceId ($friendlyName)")
-            try {
-                val deviceAddr = (tableId shl 8) or deviceId
-                // Discovery payload needs full topic paths (publishState adds prefix)
-                val prefix = mqttPublisher.topicPrefix
-                val discovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(
-                    gatewayMac = device.address,
-                    deviceAddr = deviceAddr,
-                    deviceName = friendlyName,
-                    stateTopic = "$prefix/$stateTopic",
-                    commandTopic = "$prefix/$commandTopic",
-                    appVersion = appVersion
-                )
-                // publishDiscovery uses full path (no prefix added)
-                val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
-                Log.d(TAG, "📢 Discovery topic: $discoveryTopic")
-                mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
-                Log.d(TAG, "📢 Discovery published successfully")
-            } catch (e: Exception) {
-                Log.e(TAG, "📢 Discovery publish failed: ${e.message}", e)
-            }
+        publishEntityState(
+            entityType = EntityType.SWITCH,
+            tableId = tableId,
+            deviceId = deviceId,
+            discoveryKey = "switch_$keyHex",
+            state = mapOf("state" to if (isOn) "ON" else "OFF")
+        ) { friendlyName, deviceAddr, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
+            HomeAssistantMqttDiscovery.getSwitchDiscovery(
+                gatewayMac = device.address,
+                deviceAddr = deviceAddr,
+                deviceName = friendlyName,
+                stateTopic = "$prefix/$stateTopic",
+                commandTopic = "$prefix/$commandTopic",
+                appVersion = appVersion
+            )
         }
-        
-        // Publish state (relative path, prefix added by publishState)
-        mqttPublisher.publishState(stateTopic, if (isOn) "ON" else "OFF", true)
     }
     
     /**
@@ -1321,21 +1373,16 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📦 Tank $tableId:$deviceId level=$level%")
         
-        // Topic paths - publishState adds prefix, so use relative paths
-        val baseTopic = "onecontrol/${device.address}"
-        val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
-        
-        // Publish HA discovery if not already done
         val keyHex = "%02x%02x".format(tableId, deviceId)
-        val discoveryKey = "tank_$keyHex"
-        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Tank")
-        
-        // Publish discovery - will be republished with friendly name when metadata arrives
-        if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for tank sensor $tableId:$deviceId ($friendlyName)")
-            // Discovery payload needs full topic path
-            val prefix = mqttPublisher.topicPrefix
-            val discovery = HomeAssistantMqttDiscovery.getSensorDiscovery(
+        publishEntityState(
+            entityType = EntityType.TANK_SENSOR,
+            tableId = tableId,
+            deviceId = deviceId,
+            discoveryKey = "tank_$keyHex",
+            state = mapOf("level" to level.toString())
+        ) { friendlyName, _, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
+            HomeAssistantMqttDiscovery.getSensorDiscovery(
                 gatewayMac = device.address,
                 sensorName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
@@ -1344,12 +1391,7 @@ class OneControlGattCallback(
                 icon = "mdi:gauge",
                 appVersion = appVersion
             )
-            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
-            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
-        
-        // Publish state (relative path, prefix added by publishState)
-        mqttPublisher.publishState(stateTopic, level.toString(), true)
     }
     
     /**
@@ -1436,11 +1478,9 @@ class OneControlGattCallback(
         
         Log.i(TAG, "📦 HBridge (cover) $tableId:$deviceId status=0x${status.toString(16)} position=$position (${data.size} bytes, raw=${data.joinToString(" ") { "%02X".format(it) }})")
         
-        val baseTopic = "onecontrol/${device.address}"
-        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-        // No command topic - covers are state-only sensors for safety
-        
         // Map status to HA cover state
+        // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
+        // Motors rely on operator judgment - remote control is unsafe. Exposing as state sensor only.
         val haState = when (status) {
             0xC2 -> "opening"   // Extending
             0xC3 -> "closing"   // Retracting  
@@ -1448,34 +1488,23 @@ class OneControlGattCallback(
             else -> "unknown"
         }
         
-        // Publish HA discovery as STATE SENSOR (not controllable cover)
-        // SAFETY: RV awnings/slides have no limit switches or overcurrent protection.
-        // Motors rely on operator judgment - remote control is unsafe.
         val keyHex = "%02x%02x".format(tableId, deviceId)
-        val discoveryKey = "cover_state_$keyHex"
-        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Cover")
-        
-        Log.d(TAG, "🏷️ Cover discovery: tableId=$tableId, deviceId=$deviceId, key=$keyHex, name='$friendlyName', alreadyPublished=${haDiscoveryPublished.contains(discoveryKey)}")
-        
-        // Publish discovery - will be republished with friendly name when metadata arrives
-        if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for cover STATE SENSOR $tableId:$deviceId ($friendlyName)")
-            val deviceAddr = (tableId shl 8) or deviceId
-            val prefix = mqttPublisher.topicPrefix
-            val discovery = HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
+        publishEntityState(
+            entityType = EntityType.COVER_SENSOR,
+            tableId = tableId,
+            deviceId = deviceId,
+            discoveryKey = "cover_state_$keyHex",
+            state = mapOf("state" to haState)
+        ) { friendlyName, deviceAddr, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 appVersion = appVersion
             )
-            // Publish as sensor, not cover
-            val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
-            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
-        
-        // Publish state
-        mqttPublisher.publishState(stateTopic, haState, true)
     }
     
     /**
