@@ -2,6 +2,13 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
+> **Last Updated:** December 24, 2025 - v2.3.0  
+> **Major Changes:**  
+> - Phase 1-3 refactoring complete (centralized state publishing, discovery builder, entity models)
+> - OneControl plugin now uses sealed class entity models for type safety
+> - DiscoveryBuilder pattern reduces discovery call parameters from 6-7 to 3-4
+> - Total code reduction: ~85 lines while adding type safety and maintainability
+
 ---
 
 ## Table of Contents
@@ -1248,7 +1255,342 @@ homeassistant/binary_sensor/onecontrol_ble_24dcc3ed1e0a/device_paired/config
 
 ## 8. Adding New Entity Types
 
-### Step-by-Step: Adding Cover Support
+### Entity Model Architecture (Phase 3 Refactoring)
+
+**Added in v2.3.0**: The OneControl plugin now uses a sealed class hierarchy for type-safe entity models. All entity types inherit from `OneControlEntity` and include their identifying information plus current state.
+
+**File:** `OneControlEntity.kt`
+
+```kotlin
+sealed class OneControlEntity {
+    abstract val tableId: Int
+    abstract val deviceId: Int
+    
+    val key: String get() = "%02x%02x".format(tableId, deviceId)
+    val address: String get() = "$tableId:$deviceId"
+    
+    data class Switch(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val isOn: Boolean
+    ) : OneControlEntity() {
+        val state: String get() = if (isOn) "ON" else "OFF"
+    }
+    
+    data class DimmableLight(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val brightness: Int,
+        val mode: Int
+    ) : OneControlEntity() {
+        val isOn: Boolean get() = mode > 0
+        val state: String get() = if (isOn) "ON" else "OFF"
+    }
+    
+    data class Tank(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val level: Int
+    ) : OneControlEntity()
+    
+    data class Cover(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val status: Int,
+        val position: Int = 0xFF
+    ) : OneControlEntity() {
+        val haState: String
+            get() = when (status) {
+                0xC2 -> "opening"
+                0xC3 -> "closing"
+                0xC0 -> "stopped"
+                else -> "unknown"
+            }
+    }
+    
+    data class SystemVoltageSensor(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val voltage: Float
+    ) : OneControlEntity()
+    
+    data class SystemTemperatureSensor(
+        override val tableId: Int,
+        override val deviceId: Int,
+        val temperature: Float
+    ) : OneControlEntity()
+}
+```
+
+**Benefits:**
+- Type safety: Compiler catches missing properties at build time
+- Centralization: Single source of truth for entity state
+- Testability: Easy to create entity instances for unit tests
+- Maintainability: Clear documentation of what each entity contains
+
+### Using Entity Models in Event Handlers
+
+Entity models are created in event handlers and then published using the centralized `publishEntityState()` method:
+
+**Example: Switch Handler**
+
+```kotlin
+private fun handleRelayStatus(data: ByteArray) {
+    if (data.size < 5) return
+    
+    val tableId = data[1].toInt() and 0xFF
+    val deviceId = data[2].toInt() and 0xFF
+    val statusByte = data[3].toInt() and 0xFF
+    val rawOutputState = statusByte and 0x0F
+    val isOn = rawOutputState == 0x01
+    
+    // Create entity instance
+    val entity = OneControlEntity.Switch(
+        tableId = tableId,
+        deviceId = deviceId,
+        isOn = isOn
+    )
+    
+    // Publish state and discovery using centralized method
+    publishEntityState(
+        entityType = EntityType.SWITCH,
+        tableId = entity.tableId,
+        deviceId = entity.deviceId,
+        discoveryKey = "switch_${entity.key}",
+        state = mapOf("state" to entity.state)
+    ) { friendlyName, deviceAddr, prefix, baseTopic ->
+        val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+        val commandTopic = "$baseTopic/command/switch/${entity.tableId}/${entity.deviceId}"
+        discoveryBuilder.buildSwitch(
+            deviceAddr = deviceAddr,
+            deviceName = friendlyName,
+            stateTopic = "$prefix/$stateTopic",
+            commandTopic = "$prefix/$commandTopic"
+        )
+    }
+}
+```
+
+**Example: Dimmable Light Handler**
+
+```kotlin
+private fun handleDimmableLightStatus(data: ByteArray) {
+    if (data.size < 5) return
+    
+    val tableId = data[1].toInt() and 0xFF
+    val deviceId = data[2].toInt() and 0xFF
+    val modeByte = data[3].toInt() and 0xFF
+    val brightness = data[4].toInt() and 0xFF
+    
+    // Create entity instance
+    val entity = OneControlEntity.DimmableLight(
+        tableId = tableId,
+        deviceId = deviceId,
+        brightness = brightness,
+        mode = modeByte
+    )
+    
+    // Publish with brightness
+    publishEntityState(
+        entityType = EntityType.LIGHT,
+        tableId = entity.tableId,
+        deviceId = entity.deviceId,
+        discoveryKey = "light_${entity.key}",
+        state = mapOf(
+            "state" to entity.state,
+            "brightness" to entity.brightness.toString()
+        )
+    ) { friendlyName, deviceAddr, prefix, baseTopic ->
+        val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+        val brightnessTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/brightness"
+        val commandTopic = "$baseTopic/command/dimmable/${entity.tableId}/${entity.deviceId}"
+        discoveryBuilder.buildDimmableLight(
+            deviceAddr = deviceAddr,
+            deviceName = friendlyName,
+            stateTopic = "$prefix/$stateTopic",
+            commandTopic = "$prefix/$commandTopic",
+            brightnessTopic = "$prefix/$brightnessTopic"
+        )
+    }
+}
+```
+
+### Command Handling with Entity Models
+
+Commands are handled using a `when` expression on the sealed class, which provides exhaustive type checking:
+
+```kotlin
+override fun handleCommand(topic: String, payload: String): Result<Unit> {
+    // Parse entity from topic
+    val entity = parseEntityFromTopic(topic) ?: 
+        return Result.failure(Exception("Unknown entity"))
+    
+    // Type-safe command dispatch
+    return when (entity) {
+        is OneControlEntity.Switch -> 
+            controlSwitch(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
+        
+        is OneControlEntity.DimmableLight -> 
+            controlDimmableLight(entity.tableId.toByte(), entity.deviceId.toByte(), payload)
+        
+        is OneControlEntity.Cover -> {
+            Log.w(TAG, "⚠️ Cover control is disabled for safety")
+            Result.failure(Exception("Cover control disabled for safety"))
+        }
+        
+        is OneControlEntity.Tank,
+        is OneControlEntity.SystemVoltageSensor,
+        is OneControlEntity.SystemTemperatureSensor -> {
+            Log.w(TAG, "⚠️ Sensors are read-only")
+            Result.failure(Exception("Sensors are read-only"))
+        }
+    }
+}
+```
+
+The compiler ensures all entity types are handled. If you add a new entity type to the sealed class, the compiler will force you to handle it in the `when` expression.
+
+### Step-by-Step: Adding a New Entity Type (Example: RGB Light)
+
+1. **Add entity model to `OneControlEntity.kt`:**
+
+```kotlin
+data class RgbLight(
+    override val tableId: Int,
+    override val deviceId: Int,
+    val red: Int,
+    val green: Int,
+    val blue: Int,
+    val brightness: Int
+) : OneControlEntity() {
+    val isOn: Boolean get() = brightness > 0
+    val state: String get() = if (isOn) "ON" else "OFF"
+    val rgbColor: String get() = "$red,$green,$blue"
+}
+```
+
+2. **Add entity type enum value:**
+
+```kotlin
+enum class EntityType(val haComponent: String, val topicPrefix: String) {
+    SWITCH("switch", "switch"),
+    LIGHT("light", "light"),
+    RGB_LIGHT("light", "rgb_light"),  // NEW
+    COVER_SENSOR("sensor", "cover_state"),
+    TANK_SENSOR("sensor", "tank"),
+    SYSTEM_SENSOR("sensor", "system")
+}
+```
+
+3. **Add event handler in `processDecodedFrame()`:**
+
+```kotlin
+0x09 -> {
+    Log.i(TAG, "📦 RgbLightStatus event")
+    handleRgbLightStatus(decodedFrame)
+}
+```
+
+4. **Implement the handler:**
+
+```kotlin
+private fun handleRgbLightStatus(data: ByteArray) {
+    if (data.size < 7) return
+    
+    val tableId = data[1].toInt() and 0xFF
+    val deviceId = data[2].toInt() and 0xFF
+    val red = data[3].toInt() and 0xFF
+    val green = data[4].toInt() and 0xFF
+    val blue = data[5].toInt() and 0xFF
+    val brightness = data[6].toInt() and 0xFF
+    
+    // Create entity instance
+    val entity = OneControlEntity.RgbLight(
+        tableId = tableId,
+        deviceId = deviceId,
+        red = red,
+        green = green,
+        blue = blue,
+        brightness = brightness
+    )
+    
+    // Publish with RGB color
+    publishEntityState(
+        entityType = EntityType.RGB_LIGHT,
+        tableId = entity.tableId,
+        deviceId = entity.deviceId,
+        discoveryKey = "rgb_${entity.key}",
+        state = mapOf(
+            "state" to entity.state,
+            "brightness" to entity.brightness.toString(),
+            "rgb" to entity.rgbColor
+        )
+    ) { friendlyName, deviceAddr, prefix, baseTopic ->
+        val stateTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/state"
+        val rgbTopic = "$baseTopic/device/${entity.tableId}/${entity.deviceId}/rgb"
+        val commandTopic = "$baseTopic/command/rgb/${entity.tableId}/${entity.deviceId}"
+        discoveryBuilder.buildRgbLight(
+            deviceAddr = deviceAddr,
+            deviceName = friendlyName,
+            stateTopic = "$prefix/$stateTopic",
+            commandTopic = "$prefix/$commandTopic",
+            rgbTopic = "$prefix/$rgbTopic"
+        )
+    }
+}
+```
+
+5. **Add discovery builder method in `HomeAssistantMqttDiscovery.kt`:**
+
+```kotlin
+fun buildRgbLight(
+    deviceAddr: Int,
+    deviceName: String,
+    stateTopic: String,
+    commandTopic: String,
+    rgbTopic: String
+): JSONObject {
+    val uniqueId = "onecontrol_ble_${this@HomeAssistantMqttDiscovery.gatewayMac}_rgb_${deviceAddr.toString(16)}"
+    return JSONObject().apply {
+        put("unique_id", uniqueId)
+        put("name", deviceName)
+        put("device", deviceInfo)
+        put("state_topic", stateTopic)
+        put("command_topic", commandTopic)
+        put("rgb_state_topic", rgbTopic)
+        put("rgb_command_topic", commandTopic)
+        put("schema", "template")
+        put("command_on_template", "{ \"state\": \"ON\", \"rgb\": \"{{ red }},{{ green }},{{ blue }}\" }")
+        put("command_off_template", "{ \"state\": \"OFF\" }")
+        put("icon", "mdi:lightbulb-multiple")
+    }
+}
+```
+
+6. **Add command handling:**
+
+```kotlin
+private fun handleEntityCommand(entity: OneControlEntity, payload: String): Result<Unit> {
+    return when (entity) {
+        is OneControlEntity.Switch -> controlSwitch(...)
+        is OneControlEntity.DimmableLight -> controlDimmableLight(...)
+        is OneControlEntity.RgbLight -> controlRgbLight(...)  // NEW
+        // ... rest of handlers
+    }
+}
+
+private fun controlRgbLight(tableId: Byte, deviceId: Byte, payload: String): Result<Unit> {
+    val json = JSONObject(payload)
+    val state = json.optString("state", "")
+    val rgb = json.optString("rgb", "")
+    
+    // Parse RGB values and send command
+    // Implementation depends on protocol
+    return Result.success(Unit)
+}
+```
+
+### Step-by-Step: Adding Cover Support (Legacy Example)
 
 1. **Add event handler in `processDecodedFrame()`:**
 
