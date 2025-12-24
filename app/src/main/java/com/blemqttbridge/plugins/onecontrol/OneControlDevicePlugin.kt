@@ -234,6 +234,11 @@ class OneControlGattCallback(
             "unknown"
         }
     
+    // Discovery builder for simplified HA discovery generation
+    private val discoveryBuilder by lazy {
+        HomeAssistantMqttDiscovery.DiscoveryBuilder(device.address, appVersion)
+    }
+    
     // Connection state
     private var isConnected = false
     private var isAuthenticated = false
@@ -1247,13 +1252,11 @@ class OneControlGattCallback(
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
             val commandTopic = "$baseTopic/command/switch/$tableId/$deviceId"
-            HomeAssistantMqttDiscovery.getSwitchDiscovery(
-                gatewayMac = device.address,
+            discoveryBuilder.buildSwitch(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
-                commandTopic = "$prefix/$commandTopic",
-                appVersion = appVersion
+                commandTopic = "$prefix/$commandTopic"
             )
         }
     }
@@ -1323,14 +1326,12 @@ class OneControlGattCallback(
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
             val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
             val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
-            HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
-                gatewayMac = device.address,
+            discoveryBuilder.buildDimmableLight(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
-                brightnessTopic = "$prefix/$brightnessTopic",
-                appVersion = appVersion
+                brightnessTopic = "$prefix/$brightnessTopic"
             )
         }
     }
@@ -1375,14 +1376,11 @@ class OneControlGattCallback(
             state = mapOf("level" to level.toString())
         ) { friendlyName, _, prefix, baseTopic ->
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/level"
-            HomeAssistantMqttDiscovery.getSensorDiscovery(
-                gatewayMac = device.address,
+            discoveryBuilder.buildSensor(
                 sensorName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 unit = "%",
-                deviceClass = null,
-                icon = "mdi:gauge",
-                appVersion = appVersion
+                icon = "mdi:gauge"
             )
         }
     }
@@ -1490,12 +1488,10 @@ class OneControlGattCallback(
             state = mapOf("state" to haState)
         ) { friendlyName, deviceAddr, prefix, baseTopic ->
             val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-            HomeAssistantMqttDiscovery.getCoverStateSensorDiscovery(
-                gatewayMac = device.address,
+            discoveryBuilder.buildCoverStateSensor(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
-                stateTopic = "$prefix/$stateTopic",
-                appVersion = appVersion
+                stateTopic = "$prefix/$stateTopic"
             )
         }
     }

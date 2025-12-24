@@ -14,6 +14,95 @@ object HomeAssistantMqttDiscovery {
     private const val DEVICE_ID_BASE = "onecontrol_ble_v2"
     
     /**
+     * Discovery builder class - simplifies creating discovery payloads
+     * with consistent device info and common fields.
+     */
+    class DiscoveryBuilder(
+        private val gatewayMac: String,
+        private val appVersion: String? = null
+    ) {
+        private val macNormalized = gatewayMac.replace(":", "").lowercase()
+        
+        /**
+         * Build switch discovery payload
+         */
+        fun buildSwitch(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            commandTopic: String,
+            attributesTopic: String? = null
+        ): JSONObject {
+            return getSwitchDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, commandTopic, attributesTopic, appVersion
+            )
+        }
+        
+        /**
+         * Build dimmable light discovery payload
+         */
+        fun buildDimmableLight(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String,
+            commandTopic: String,
+            brightnessTopic: String
+        ): JSONObject {
+            return getDimmableLightDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, commandTopic, brightnessTopic, appVersion
+            )
+        }
+        
+        /**
+         * Build cover state sensor discovery payload (state-only, no control)
+         */
+        fun buildCoverStateSensor(
+            deviceAddr: Int,
+            deviceName: String,
+            stateTopic: String
+        ): JSONObject {
+            return getCoverStateSensorDiscovery(
+                gatewayMac, deviceAddr, deviceName,
+                stateTopic, appVersion
+            )
+        }
+        
+        /**
+         * Build sensor discovery payload
+         */
+        fun buildSensor(
+            sensorName: String,
+            stateTopic: String,
+            unit: String? = null,
+            deviceClass: String? = null,
+            icon: String? = null
+        ): JSONObject {
+            return getSensorDiscovery(
+                gatewayMac, sensorName, stateTopic,
+                unit, deviceClass, icon, appVersion
+            )
+        }
+        
+        /**
+         * Get discovery topic for an entity
+         */
+        fun getDiscoveryTopic(component: String, topicPrefix: String, deviceAddr: Int): String {
+            val objectId = "${topicPrefix}_${deviceAddr.toString(16).padStart(4, '0')}"
+            return "homeassistant/$component/onecontrol_ble_$macNormalized/$objectId/config"
+        }
+        
+        /**
+         * Get discovery topic for a system sensor
+         */
+        fun getSystemSensorTopic(sensorName: String): String {
+            val objectId = "system_${sanitizeName(sensorName)}"
+            return "homeassistant/sensor/onecontrol_ble_$macNormalized/$objectId/config"
+        }
+    }
+    
+    /**
      * Generate device info object for Home Assistant
      * All entities will be grouped under this device
      */
