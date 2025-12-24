@@ -21,8 +21,9 @@ object HomeAssistantMqttDiscovery {
         return JSONObject().apply {
             put("identifiers", JSONArray().put("${DEVICE_ID_BASE}_$gatewayMac"))
             put("name", "OneControl BLE Gateway")
-            put("model", "OneControl Gateway")
-            appVersion?.let { put("sw_version", "App Version: $it") } ?: put("sw_version", "App Version: MyRvLink Protocol v6")
+            put("model", "OneControl plugin for the Android BLE to MQTT Bridge")
+            put("manufacturer", "phurth")
+            appVersion?.let { put("sw_version", it) }
             put("connections", JSONArray().put(JSONArray().put("mac").put(formatMacForDisplay(gatewayMac))))
             // Removed via_device to prevent "Unknown Device" parent device
         }
@@ -92,9 +93,10 @@ object HomeAssistantMqttDiscovery {
             // Match legacy per-entity device grouping used by other entities
             put("device", JSONObject().apply {
                 put("identifiers", JSONArray().put(DEVICE_ID_BASE).put(objectId))
-                put("model", "OneControl Gateway")
+                put("model", "OneControl plugin for the Android BLE to MQTT Bridge")
+                put("manufacturer", "phurth")
                 put("name", "OneControl BLE Gateway")
-                appVersion?.let { put("sw_version", "App Version: $it") }
+                appVersion?.let { put("sw_version", it) }
                 put("connections", JSONArray().put(JSONArray().put("mac").put(formatMacForDisplay(gatewayMac))))
             })
 

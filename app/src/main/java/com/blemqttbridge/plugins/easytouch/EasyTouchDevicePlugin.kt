@@ -908,6 +908,13 @@ class EasyTouchGattCallback(
             
             Log.i(TAG, "📝 Discovery for zone $zone: modes=$supportedModes, temp range=$minTemp-$maxTemp")
             
+            // Get app version
+            val appVersion = try {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+            } catch (e: Exception) {
+                "unknown"
+            }
+            
             val payload = JSONObject().apply {
                 put("name", entityName)
                 put("unique_id", uniqueId)
@@ -915,8 +922,10 @@ class EasyTouchGattCallback(
                 put("device", JSONObject().apply {
                     put("identifiers", JSONArray().put("easytouch_$mac"))
                     put("name", deviceName)
-                    put("manufacturer", "Micro-Air")
-                    put("model", "EasyTouch")
+                    put("manufacturer", "phurth")
+                    put("model", "Micro-Air EasyTouch RV thermostat plugin for the Android BLE to MQTT Bridge")
+                    put("sw_version", appVersion)
+                    put("connections", JSONArray().put(JSONArray().put("mac").put(device.address)))
                 })
                 put("modes", JSONArray(supportedModes))  // Use actual device capabilities
                 put("fan_modes", JSONArray(EasyTouchConstants.SUPPORTED_FAN_MODES))

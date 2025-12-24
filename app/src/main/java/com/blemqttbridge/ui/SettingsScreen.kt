@@ -76,10 +76,28 @@ fun SettingsScreen(
     var showRemoveConfirmation by remember { mutableStateOf(false) }
     var pluginToRemove by remember { mutableStateOf<String?>(null) }
     
+    // Get app version
+    val appVersion = remember {
+        try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+        } catch (e: Exception) {
+            "?"
+        }
+    }
+    
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("BLE-MQTT Bridge", style = MaterialTheme.typography.titleSmall) },
+                title = { 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("BLE-MQTT Bridge", style = MaterialTheme.typography.titleSmall)
+                        Text("v$appVersion", style = MaterialTheme.typography.labelSmall)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer

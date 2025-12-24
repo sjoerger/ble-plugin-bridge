@@ -239,6 +239,13 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
             val nodeId = "ble_mqtt_bridge"
             val uniqueId = "ble_mqtt_bridge_availability"
             
+            // Get app version
+            val appVersion = try {
+                context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+            } catch (e: Exception) {
+                "unknown"
+            }
+            
             val discoveryPayload = org.json.JSONObject().apply {
                 put("name", "BLE Bridge Availability")
                 put("unique_id", uniqueId)
@@ -250,8 +257,9 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                 put("device", org.json.JSONObject().apply {
                     put("identifiers", org.json.JSONArray().put("ble_mqtt_bridge"))
                     put("name", "BLE MQTT Bridge")
-                    put("model", "Android BLE Bridge")
-                    put("manufacturer", "Custom")
+                    put("model", "Android BLE to MQTT Bridge")
+                    put("manufacturer", "phurth")
+                    put("sw_version", appVersion)
                 })
             }.toString()
             

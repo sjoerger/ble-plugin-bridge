@@ -70,6 +70,14 @@ class OneControlDevicePlugin : BleDevicePlugin {
     // Current callback instance for command handling
     private var currentCallback: OneControlGattCallback? = null
     
+    // Get app version dynamically
+    private val appVersion: String
+        get() = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+    
     override fun initialize(context: Context, config: PluginConfig) {
         Log.i(TAG, "Initializing OneControl Device Plugin v$PLUGIN_VERSION")
         this.context = context
@@ -217,6 +225,14 @@ class OneControlGattCallback(
     
     // Handler for main thread operations
     private val handler = Handler(Looper.getMainLooper())
+    
+    // Get app version dynamically for HA discovery
+    private val appVersion: String
+        get() = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
     
     // Connection state
     private var isConnected = false
@@ -1171,7 +1187,7 @@ class OneControlGattCallback(
                     deviceName = friendlyName,
                     stateTopic = "$prefix/$stateTopic",
                     commandTopic = "$prefix/$commandTopic",
-                    appVersion = "PluginBridge v2"
+                    appVersion = appVersion
                 )
                 // publishDiscovery uses full path (no prefix added)
                 val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
@@ -1259,7 +1275,7 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
                 brightnessTopic = "$prefix/$brightnessTopic",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             // publishDiscovery uses full path (no prefix added)
             val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
@@ -1323,7 +1339,7 @@ class OneControlGattCallback(
                 unit = "%",
                 deviceClass = null,
                 icon = "mdi:gauge",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1368,7 +1384,7 @@ class OneControlGattCallback(
                     unit = "V",
                     deviceClass = "voltage",
                     icon = "mdi:car-battery",
-                    appVersion = "PluginBridge v2"
+                    appVersion = appVersion
                 )
                 val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_voltage/config"
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1392,7 +1408,7 @@ class OneControlGattCallback(
                     unit = "°F",
                     deviceClass = "temperature",
                     icon = "mdi:thermometer",
-                    appVersion = "PluginBridge v2"
+                    appVersion = appVersion
                 )
                 val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/system_temperature/config"
                 mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1448,7 +1464,7 @@ class OneControlGattCallback(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             // Publish as sensor, not cover
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
@@ -1552,7 +1568,7 @@ class OneControlGattCallback(
                 unit = "%",
                 deviceClass = null,
                 icon = "mdi:gauge",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1718,7 +1734,7 @@ class OneControlGattCallback(
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/switch/onecontrol_ble_${device.address.replace(":", "").lowercase()}/switch_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1736,7 +1752,7 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 commandTopic = "$prefix/$commandTopic",
                 brightnessTopic = "$prefix/$brightnessTopic",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1751,7 +1767,7 @@ class OneControlGattCallback(
                 stateTopic = "$prefix/$stateTopic",
                 unit = "%",
                 icon = "mdi:gauge",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/tank_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
@@ -1767,7 +1783,7 @@ class OneControlGattCallback(
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
                 stateTopic = "$prefix/$stateTopic",
-                appVersion = "PluginBridge v2"
+                appVersion = appVersion
             )
             val discoveryTopic = "$prefix/sensor/onecontrol_ble_${device.address.replace(":", "").lowercase()}/cover_state_$keyHex/config"
             mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())

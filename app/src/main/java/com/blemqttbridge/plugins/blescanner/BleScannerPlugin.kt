@@ -35,8 +35,8 @@ class BleScannerPlugin(
         // HA Device Info
         private const val DEVICE_ID = "ble_scanner"
         private const val DEVICE_NAME = "BLE Scanner"
-        private const val DEVICE_MANUFACTURER = "BLE MQTT Bridge"
-        private const val DEVICE_MODEL = "Scanner Plugin"
+        private const val DEVICE_MANUFACTURER = "phurth"
+        private const val DEVICE_MODEL = "BLE scanner plugin for the Android BLE to MQTT Bridge"
     }
     
     private val handler = Handler(Looper.getMainLooper())
@@ -241,13 +241,20 @@ class BleScannerPlugin(
     private fun publishDiscovery() {
         val topicPrefix = mqttPublisher.topicPrefix
         
+        // Get app version
+        val appVersion = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        
         // Device info for all entities
         val deviceInfo = JSONObject().apply {
             put("identifiers", JSONArray().put(DEVICE_ID))
             put("name", DEVICE_NAME)
             put("manufacturer", DEVICE_MANUFACTURER)
             put("model", DEVICE_MODEL)
-            put("sw_version", "1.0.0")
+            put("sw_version", appVersion)
         }
         
         // 1. Scanning binary sensor
