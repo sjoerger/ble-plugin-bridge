@@ -194,6 +194,10 @@ class EasyTouchGattCallback(
     
     // Status polling (matches official app's 4-second interval)
     private var isPollingActive = false
+    
+    // Status update suppression (prevents UI bounce-back after sending commands)
+    @Volatile private var isStatusSuppressed = false
+    
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isAuthenticated) {
@@ -307,6 +311,20 @@ class EasyTouchGattCallback(
         Log.i(TAG, "⏹ Stopping status polling loop")
         isPollingActive = false
         mainHandler.removeCallbacks(statusPollRunnable)
+    }
+    
+    /**
+     * Temporarily suppress status updates to prevent UI bounce-back.
+     * Called after sending commands to give the thermostat time to process.
+     * Matches official app's "StartIgnoreStatus" behavior.
+     */
+    private fun suppressStatusUpdates(durationMs: Long) {
+        Log.d(TAG, "🚫 Suppressing status updates for ${durationMs}ms")
+        isStatusSuppressed = true
+        mainHandler.postDelayed({
+            isStatusSuppressed = false
+            Log.d(TAG, "✅ Status updates resumed")
+        }, durationMs)
     }
     
     // ===== AUTHENTICATION =====
@@ -488,14 +506,24 @@ class EasyTouchGattCallback(
             type == "Response" && responseType == "Status" -> {
                 val state = parseMultiZoneStatus(json)
                 currentState = state
-                publishState(state)
-                Log.i(TAG, "✅ Status update received and published")
+                
+                // Skip publishing if status updates are suppressed (command in progress)
+                if (isStatusSuppressed) {
+                    Log.d(TAG, "⏸️ Status update suppressed (command in progress)")
+                } else {
+                    publishState(state)
+                    Log.i(TAG, "✅ Status update received and published")
+                }
             }
             // Legacy format: Type="Status"
             type == "Status" -> {
                 val state = parseMultiZoneStatus(json)
                 currentState = state
-                publishState(state)
+                
+                // Skip publishing if status updates are suppressed (command in progress)
+                if (!isStatusSuppressed) {
+                    publishState(state)
+                }
             }
             type == "Change Result" || (type == "Response" && responseType == "Change") -> {
                 val success = json.optBoolean("Success", false)
@@ -820,16 +848,22 @@ class EasyTouchGattCallback(
         val modeValue = EasyTouchConstants.HA_MODE_TO_DEVICE[payload]
             ?: return Result.failure(Exception("Unknown mode: $payload"))
         
+        // Official app sends ONLY mode, not power - mode=0 means zone off
         val command = JSONObject().apply {
             put("Type", "Change")
             put("Changes", JSONObject().apply {
                 put("zone", zone)
-                put("power", if (payload == "off") 0 else 1)
                 put("mode", modeValue)
             })
         }
         
+        Log.i(TAG, "📤 Sending mode command: zone=$zone, mode=$modeValue (HA mode: $payload)")
         writeJsonCommand(command)
+        
+        // Suppress status updates for 2 seconds to let thermostat process command
+        // (prevents UI bounce-back from stale status)
+        suppressStatusUpdates(2000)
+        
         return Result.success(Unit)
     }
     
@@ -855,7 +889,9 @@ class EasyTouchGattCallback(
                 put("Type", "Change")
                 put("Changes", changes)
             }
+            Log.i(TAG, "📤 Sending temperature command: zone=$zone, temp=$temp for mode=$mode")
             writeJsonCommand(command)
+            suppressStatusUpdates(2000)
         }
         
         return Result.success(Unit)
@@ -873,7 +909,9 @@ class EasyTouchGattCallback(
             })
         }
         
+        Log.i(TAG, "📤 Sending temp high command: zone=$zone, autoCool_sp=$temp")
         writeJsonCommand(command)
+        suppressStatusUpdates(2000)
         return Result.success(Unit)
     }
     
@@ -889,7 +927,9 @@ class EasyTouchGattCallback(
             })
         }
         
+        Log.i(TAG, "📤 Sending temp low command: zone=$zone, autoHeat_sp=$temp")
         writeJsonCommand(command)
+        suppressStatusUpdates(2000)
         return Result.success(Unit)
     }
     
@@ -917,7 +957,9 @@ class EasyTouchGattCallback(
             put("Changes", changes)
         }
         
+        Log.i(TAG, "📤 Sending fan mode command: zone=$zone, fan=$fanValue for mode=$mode")
         writeJsonCommand(command)
+        suppressStatusUpdates(2000)
         return Result.success(Unit)
     }
 }
