@@ -90,15 +90,7 @@ object HomeAssistantMqttDiscovery {
             put("unique_id", uniqueId)
             put("name", deviceName)  // Entity name (not prefixed with device name)
             put("default_entity_id", "light.$objectId")  // Replace deprecated object_id
-            // Match legacy per-entity device grouping used by other entities
-            put("device", JSONObject().apply {
-                put("identifiers", JSONArray().put(DEVICE_ID_BASE).put(objectId))
-                put("model", "OneControl plugin for the Android BLE to MQTT Bridge")
-                put("manufacturer", "phurth")
-                put("name", "OneControl BLE Gateway")
-                appVersion?.let { put("sw_version", it) }
-                put("connections", JSONArray().put(JSONArray().put("mac").put(formatMacForDisplay(gatewayMac))))
-            })
+            put("device", getDeviceInfo(gatewayMac, appVersion))
 
             // Classic MQTT light schema: state + brightness topics
             put("state_topic", stateTopic)
