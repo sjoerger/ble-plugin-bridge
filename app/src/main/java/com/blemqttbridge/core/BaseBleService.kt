@@ -784,18 +784,15 @@ class BaseBleService : Service() {
      * Routes MQTT commands to the plugin's handleCommand method.
      */
     private fun subscribeToDeviceCommands(device: BluetoothDevice, pluginId: String, plugin: BleDevicePlugin?) {
+        Log.i(TAG, "📡 subscribeToDeviceCommands called for $pluginId, plugin=${plugin != null}")
         val output = outputPlugin
         if (output == null || plugin == null) {
-            Log.w(TAG, "Cannot subscribe to commands - output or plugin not available")
+            Log.w(TAG, "❌ Cannot subscribe to commands - output=${output != null}, plugin=${plugin != null}")
             return
         }
         
-        // Get base topic from plugin (e.g., "onecontrol/24:DC:C3:ED:1E:0A")
-        val baseTopic = plugin.getMqttBaseTopic(device)
-        
-        // Subscribe to command topics with wildcard
-        // Note: subscribeToCommands adds the prefix ("homeassistant/") automatically
-        val commandTopicPattern = "$baseTopic/command/#"
+        // Get command topic pattern from plugin (allows zone wildcards, etc.)
+        val commandTopicPattern = plugin.getCommandTopicPattern(device)
         
         Log.i(TAG, "📡 Subscribing to command topic: $commandTopicPattern")
         

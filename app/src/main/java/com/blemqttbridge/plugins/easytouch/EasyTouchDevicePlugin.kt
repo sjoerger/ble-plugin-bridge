@@ -135,6 +135,12 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
         return "easytouch/${device.address}"
     }
     
+    override fun getCommandTopicPattern(device: BluetoothDevice): String {
+        // EasyTouch uses zone-based topics: easytouch/{MAC}/zone_N/command/#
+        // The + wildcard matches zone_0, zone_1, etc.
+        return "${getMqttBaseTopic(device)}/+/command/#"
+    }
+    
     override fun getDiscoveryPayloads(device: BluetoothDevice): List<Pair<String, String>> {
         // Discovery is published by callback after zone detection
         return emptyList()
@@ -188,6 +194,11 @@ class EasyTouchGattCallback(
     
     // Current state (multi-zone aware)
     private var currentState: ThermostatState? = null
+    
+    // Zone configurations (includes available modes bitmask from device)
+    // Key = zone number, Value = ZoneConfiguration
+    private val zoneConfigs = mutableMapOf<Int, ZoneConfiguration>()
+    private var configRequestedZone = 0  // Track which zone we're requesting config for
     
     // Response buffer for multi-packet JSON responses
     private val responseBuffer = StringBuilder()
@@ -358,10 +369,10 @@ class EasyTouchGattCallback(
             EasyTouchConstants.PASSWORD_CMD_UUID -> {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.i(TAG, "✅ Password written successfully")
-                    // Mark as authenticated and start continuous polling
                     isAuthenticated = true
-                    Log.i(TAG, "🎉 Fully authenticated! Starting status polling loop...")
-                    startStatusPolling()
+                    Log.i(TAG, "🎉 Fully authenticated! Requesting device config...")
+                    // Request config first to get available modes, then start polling
+                    requestConfig(zone = 0)
                 } else {
                     Log.e(TAG, "Password write failed: $status")
                 }
@@ -445,6 +456,20 @@ class EasyTouchGattCallback(
     
     // ===== JSON COMMUNICATION =====
     
+    /**
+     * Request device configuration for a zone.
+     * This retrieves the MAV (Mode AVailable) bitmask which tells us what modes the device supports.
+     */
+    private fun requestConfig(zone: Int) {
+        configRequestedZone = zone
+        val command = JSONObject().apply {
+            put("Type", "Get Config")
+            put("Zone", zone)
+        }
+        Log.i(TAG, "📋 Requesting config for zone $zone...")
+        writeJsonCommand(command)
+    }
+    
     private fun requestStatus(zone: Int) {
         val command = JSONObject().apply {
             put("Type", "Get Status")
@@ -455,17 +480,38 @@ class EasyTouchGattCallback(
         writeJsonCommand(command)
     }
     
-    private fun writeJsonCommand(json: JSONObject) {
-        val char = jsonCmdChar ?: return
-        val g = gatt ?: return
+    private fun writeJsonCommand(json: JSONObject, retryCount: Int = 0) {
+        val char = jsonCmdChar ?: run {
+            Log.e(TAG, "Cannot write: jsonCmdChar is null")
+            return
+        }
+        val g = gatt ?: run {
+            Log.e(TAG, "Cannot write: gatt is null")
+            return
+        }
         
         val jsonString = json.toString()
-        Log.d(TAG, "Writing JSON command: $jsonString")
         
-        char.value = jsonString.toByteArray(StandardCharsets.UTF_8)
-        if (!g.writeCharacteristic(char)) {
-            Log.e(TAG, "Failed to write JSON command")
-        }
+        // Add small delay before write to improve reliability (like HACS integration does)
+        val delayMs = if (retryCount == 0) 100L else (200L * (retryCount + 1))
+        
+        mainHandler.postDelayed({
+            char.value = jsonString.toByteArray(StandardCharsets.UTF_8)
+            val success = g.writeCharacteristic(char)
+            
+            if (success) {
+                Log.d(TAG, "Writing JSON command (attempt ${retryCount + 1}): $jsonString")
+            } else {
+                Log.e(TAG, "Failed to write JSON command (attempt ${retryCount + 1})")
+                // Retry up to 2 more times with increasing delays
+                if (retryCount < 2) {
+                    Log.i(TAG, "Retrying write in ${delayMs * 2}ms...")
+                    writeJsonCommand(json, retryCount + 1)
+                } else {
+                    Log.e(TAG, "Write failed after 3 attempts: $jsonString")
+                }
+            }
+        }, delayMs)
     }
     
     override fun onCharacteristicChanged(
@@ -502,6 +548,10 @@ class EasyTouchGattCallback(
         val responseType = json.optString("RT", "")  // Response type field
         
         when {
+            // Config response: Type="Response", RT="Config"
+            type == "Response" && responseType == "Config" -> {
+                parseConfigResponse(json)
+            }
             // Status response: Type="Response", RT="Status"
             type == "Response" && responseType == "Status" -> {
                 val state = parseMultiZoneStatus(json)
@@ -539,6 +589,93 @@ class EasyTouchGattCallback(
                 Log.w(TAG, "Unknown response: Type=$type, RT=$responseType")
             }
         }
+    }
+    
+    /**
+     * Parse device configuration response.
+     * Contains MAV (Mode AVailable) bitmask and setpoint limits.
+     * Response format: {"Type":"Response","RT":"Config",...,"CFG":{"Zone":N,"MAV":...,"SPL":[...]}}
+     */
+    private fun parseConfigResponse(json: JSONObject) {
+        // Config data is nested inside CFG object
+        val cfg = json.optJSONObject("CFG")
+        if (cfg == null) {
+            Log.w(TAG, "⚠️ No CFG object in config response")
+            // Continue to next zone anyway
+            val nextZone = configRequestedZone + 1
+            if (nextZone <= 3) {
+                mainHandler.postDelayed({ requestConfig(nextZone) }, 300)
+            } else {
+                startStatusPolling()
+            }
+            return
+        }
+        
+        val zone = cfg.optInt("Zone", configRequestedZone)
+        val mav = cfg.optInt("MAV", 0)  // Mode Available bitmask
+        
+        // Parse setpoint limits (SPL array: [minCool, maxCool, minHeat, maxHeat])
+        val splArray = cfg.optJSONArray("SPL")
+        val minCool = splArray?.optInt(0) ?: EasyTouchConstants.MIN_TEMP_F
+        val maxCool = splArray?.optInt(1) ?: EasyTouchConstants.MAX_TEMP_F
+        val minHeat = splArray?.optInt(2) ?: EasyTouchConstants.MIN_TEMP_F
+        val maxHeat = splArray?.optInt(3) ?: EasyTouchConstants.MAX_TEMP_F
+        
+        val config = ZoneConfiguration(
+            zone = zone,
+            availableModesBitmask = mav,
+            minCoolSetpoint = minCool,
+            maxCoolSetpoint = maxCool,
+            minHeatSetpoint = minHeat,
+            maxHeatSetpoint = maxHeat
+        )
+        
+        zoneConfigs[zone] = config
+        
+        // Log discovered capabilities
+        val supportedModes = getModesFromBitmask(mav)
+        Log.i(TAG, "📋 Zone $zone config: MAV=0x${mav.toString(16)} (${mav.toString(2).padStart(16, '0')})")
+        Log.i(TAG, "   Supported modes: $supportedModes")
+        Log.i(TAG, "   Setpoint limits: cool=$minCool-$maxCool, heat=$minHeat-$maxHeat")
+        
+        // Request config for next zone (up to zone 3) or start polling
+        if (zone < 3) {
+            mainHandler.postDelayed({
+                requestConfig(zone + 1)
+            }, 300)
+        } else {
+            // All zones configured, now start polling
+            Log.i(TAG, "✅ All zone configs received. Starting status polling...")
+            startStatusPolling()
+        }
+    }
+    
+    /**
+     * Convert MAV bitmask to list of HA mode strings.
+     * MAV bit positions correspond to device mode numbers:
+     * bit 0 = mode 0 (off), bit 1 = mode 1 (fan_only), bit 2 = mode 2 (cool), etc.
+     */
+    private fun getModesFromBitmask(mav: Int): List<String> {
+        if (mav == 0) {
+            // If no MAV provided, return default modes
+            return EasyTouchConstants.SUPPORTED_HVAC_MODES
+        }
+        
+        val modes = mutableListOf<String>()
+        // Always include "off" - it's a universal mode
+        modes.add("off")
+        
+        // Check each bit in the MAV
+        for (bit in 0..15) {
+            if ((mav and (1 shl bit)) != 0) {
+                val haMode = EasyTouchConstants.DEVICE_TO_HA_MODE[bit]
+                if (haMode != null && haMode != "off" && !modes.contains(haMode)) {
+                    modes.add(haMode)
+                }
+            }
+        }
+        
+        return modes
     }
     
     // ===== STATE PARSING (Multi-Zone) =====
@@ -619,7 +756,7 @@ class EasyTouchGattCallback(
         // Publish discovery for each zone (once)
         if (!discoveryPublished && state.availableZones.isNotEmpty()) {
             publishDiscovery(state.availableZones)
-            subscribeToCommands()
+            // Note: Command subscription is handled by BaseBleService using getCommandTopicPattern()
             discoveryPublished = true
         }
         
@@ -648,19 +785,35 @@ class EasyTouchGattCallback(
         mqttPublisher.publishState("$zoneTopic/state/mode", mode, true)
         
         // Target temperature based on mode
+        // For HA MQTT climate, we need to always publish high/low temps so the UI knows about them
+        // In non-auto modes, we publish "None" to indicate they're not active
         when (mode) {
             "cool" -> {
                 mqttPublisher.publishState("$zoneTopic/state/target_temperature", state.coolSetpoint.toString(), true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", "None", true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", "None", true)
             }
             "heat" -> {
                 mqttPublisher.publishState("$zoneTopic/state/target_temperature", state.heatSetpoint.toString(), true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", "None", true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", "None", true)
             }
             "auto" -> {
+                // In auto mode, publish high/low temps and clear single target
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature", "None", true)
                 mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", state.autoCoolSetpoint.toString(), true)
                 mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", state.autoHeatSetpoint.toString(), true)
             }
             "dry" -> {
                 mqttPublisher.publishState("$zoneTopic/state/target_temperature", state.drySetpoint.toString(), true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", "None", true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", "None", true)
+            }
+            else -> {
+                // Off or fan_only modes - clear all temperature targets
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature", "None", true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", "None", true)
+                mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", "None", true)
             }
         }
         
@@ -718,29 +871,6 @@ class EasyTouchGattCallback(
         Log.d(TAG, "Published availability: $payload to $baseTopic/availability")
     }
     
-    // ===== MQTT COMMAND SUBSCRIPTION =====
-    
-    /**
-     * Subscribe to MQTT command topics for all zones.
-     * Topic pattern: easytouch/{MAC}/+/command/# matches all zone commands
-     * The + wildcard matches zone_0, zone_1, etc.
-     */
-    private fun subscribeToCommands() {
-        // Subscribe to all command topics for this device
-        // Pattern: easytouch/{MAC}/+/command/# (+ matches zone_N)
-        val commandPattern = "$baseTopic/+/command/#"
-        
-        mqttPublisher.subscribeToCommands(commandPattern) { topic, payload ->
-            Log.d(TAG, "📥 Received command: $topic = $payload")
-            val result = handleCommand(topic, payload)
-            if (result.isFailure) {
-                Log.e(TAG, "Command failed: ${result.exceptionOrNull()?.message}")
-            }
-        }
-        
-        Log.i(TAG, "✅ Subscribed to command topic: $commandPattern")
-    }
-    
     // ===== DISCOVERY PUBLISHING =====
     
     private fun publishDiscovery(zones: List<Int>) {
@@ -764,6 +894,20 @@ class EasyTouchGattCallback(
             val fullZoneTopic = "$prefix/$zoneTopic"
             val fullBaseTopic = "$prefix/$baseTopic"
             
+            // Get available modes from device config (MAV bitmask)
+            val zoneConfig = zoneConfigs[zone]
+            val supportedModes = if (zoneConfig != null && zoneConfig.availableModesBitmask != 0) {
+                getModesFromBitmask(zoneConfig.availableModesBitmask)
+            } else {
+                EasyTouchConstants.SUPPORTED_HVAC_MODES  // Fallback to defaults
+            }
+            
+            // Get setpoint limits from config
+            val minTemp = zoneConfig?.minHeatSetpoint ?: EasyTouchConstants.MIN_TEMP_F
+            val maxTemp = zoneConfig?.maxCoolSetpoint ?: EasyTouchConstants.MAX_TEMP_F
+            
+            Log.i(TAG, "📝 Discovery for zone $zone: modes=$supportedModes, temp range=$minTemp-$maxTemp")
+            
             val payload = JSONObject().apply {
                 put("name", entityName)
                 put("unique_id", uniqueId)
@@ -774,12 +918,12 @@ class EasyTouchGattCallback(
                     put("manufacturer", "Micro-Air")
                     put("model", "EasyTouch")
                 })
-                put("modes", JSONArray(EasyTouchConstants.SUPPORTED_HVAC_MODES))
+                put("modes", JSONArray(supportedModes))  // Use actual device capabilities
                 put("fan_modes", JSONArray(EasyTouchConstants.SUPPORTED_FAN_MODES))
                 put("temperature_unit", "F")
                 put("temp_step", EasyTouchConstants.TEMP_STEP)
-                put("min_temp", EasyTouchConstants.MIN_TEMP_F)
-                put("max_temp", EasyTouchConstants.MAX_TEMP_F)
+                put("min_temp", minTemp)
+                put("max_temp", maxTemp)
                 
                 // State topics (full path including prefix)
                 put("mode_state_topic", "$fullZoneTopic/state/mode")
@@ -796,6 +940,9 @@ class EasyTouchGattCallback(
                 put("temperature_high_command_topic", "$fullZoneTopic/command/temperature_high")
                 put("temperature_low_command_topic", "$fullZoneTopic/command/temperature_low")
                 put("fan_mode_command_topic", "$fullZoneTopic/command/fan_mode")
+                
+                // Optimistic mode - assume command succeeds immediately to prevent UI bounce
+                put("optimistic", true)
                 
                 // Availability (full path including prefix)
                 put("availability_topic", "$fullBaseTopic/availability")
@@ -848,16 +995,20 @@ class EasyTouchGattCallback(
         val modeValue = EasyTouchConstants.HA_MODE_TO_DEVICE[payload]
             ?: return Result.failure(Exception("Unknown mode: $payload"))
         
-        // Official app sends ONLY mode, not power - mode=0 means zone off
+        // HACS integration sends power: 0 for OFF, power: 1 for other modes
+        // This is required for the thermostat to accept mode changes
+        val powerValue = if (payload == "off") 0 else 1
+        
         val command = JSONObject().apply {
             put("Type", "Change")
             put("Changes", JSONObject().apply {
                 put("zone", zone)
+                put("power", powerValue)
                 put("mode", modeValue)
             })
         }
         
-        Log.i(TAG, "📤 Sending mode command: zone=$zone, mode=$modeValue (HA mode: $payload)")
+        Log.i(TAG, "📤 Sending mode command: zone=$zone, power=$powerValue, mode=$modeValue (HA mode: $payload)")
         writeJsonCommand(command)
         
         // Suppress status updates for 2 seconds to let thermostat process command
@@ -963,6 +1114,19 @@ class EasyTouchGattCallback(
         return Result.success(Unit)
     }
 }
+
+/**
+ * Data class to hold configuration for a zone.
+ * Parsed from "Get Config" response which includes MAV (Mode AVailable) bitmask.
+ */
+data class ZoneConfiguration(
+    val zone: Int,
+    val availableModesBitmask: Int,  // MAV - bitmask of supported modes
+    val minCoolSetpoint: Int,
+    val maxCoolSetpoint: Int,
+    val minHeatSetpoint: Int,
+    val maxHeatSetpoint: Int
+)
 
 /**
  * Data class to hold state for a single zone.

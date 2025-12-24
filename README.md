@@ -90,6 +90,40 @@ The OneControl plugin connects to LCI/Lippert OneControl BLE gateways found in R
 
 ---
 
+### EasyTouch Thermostat (Micro-Air)
+
+The EasyTouch plugin connects to Micro-Air EasyTouch BLE thermostats commonly found in RVs.
+
+#### Configuration
+
+1. Expand "EasyTouch Settings" in the app
+2. Enter the **Thermostat MAC Address** (found in Bluetooth settings or the official app)
+3. Enter your **Thermostat Password** (default is often on a sticker on the unit)
+4. Enable the **EasyTouch** toggle, then the **BLE Service** toggle
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Multi-Zone Support** | Up to 4 climate zones |
+| **Capability Discovery** | Only shows modes your device supports |
+| **Auto Mode** | High/low setpoint UI when in Auto |
+| **Temperature Limits** | Min/max from actual device config |
+
+#### Supported Modes
+
+Modes are discovered dynamically from device. Common modes:
+- Off, Heat, Cool, Auto, Fan Only
+- Dry (only if device supports it)
+
+#### Troubleshooting
+
+- **First command fails:** Normal BLE timing issue - retry built in
+- **Wrong modes showing:** Delete the HA climate entity and let it rediscover
+- **Connection drops:** Check thermostat is in range and not connected to another device
+
+---
+
 ### BLE Scanner Plugin
 
 A utility plugin that scans for nearby BLE devices and publishes results to MQTT. This is not needed for anything else to function, but was added as a proof of concept for supporting multiple BLE connected plugins and might be useful, so I left it in.

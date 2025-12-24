@@ -745,6 +745,104 @@ companion object {
 
 **Reference:** Official app `U_Thermostat.java` line 663: `mStatusHandler.postDelayed(this.statusRunnable, 4000)`
 
+### Capability Discovery (Get Config)
+
+After authentication, the plugin requests device configuration to discover supported modes and setpoint limits. This prevents showing unsupported modes (e.g., "dry" on devices without dehumidification).
+
+**Connection Sequence:**
+```
+1. Connect → Authenticate
+2. Request Config for zones 0-3
+3. Parse MAV bitmask and setpoint limits
+4. Start status polling
+5. Publish discovery (with actual device capabilities)
+```
+
+**Get Config Command:**
+```json
+{"Type":"Get Config","Zone":0}
+```
+
+**Config Response:**
+```json
+{
+  "Type": "Response",
+  "RT": "Config",
+  "CFG": {
+    "Zone": 0,
+    "MAV": 2070,
+    "MA": [0,128,192,...],
+    "FA": [16,34,194,...],
+    "SPL": [55, 95, 40, 95]
+  }
+}
+```
+
+**CRITICAL:** Config data is nested inside `CFG` object, not at root level.
+
+### MAV (Mode AVailable) Bitmask
+
+The `MAV` field is a bitmask indicating which HVAC modes the device supports:
+
+| Bit | Value | Mode | HA Mode |
+|-----|-------|------|---------|
+| 0 | 1 | Off | off |
+| 1 | 2 | Fan Only | fan_only |
+| 2 | 4 | Cool | cool |
+| 4 | 16 | Heat | heat |
+| 6 | 64 | Dry | dry |
+| 11 | 2048 | Auto | auto |
+
+**Example:** MAV=2070 = 2+4+16+2048 = fan_only, cool, heat, auto (NO dry mode)
+
+**Parsing:**
+```kotlin
+private fun getModesFromBitmask(mav: Int): List<String> {
+    if (mav == 0) return defaultModes  // Fallback if no MAV
+    
+    val modes = mutableListOf("off")  // Always include off
+    for (bit in 0..15) {
+        if ((mav and (1 shl bit)) != 0) {
+            DEVICE_TO_HA_MODE[bit]?.let { modes.add(it) }
+        }
+    }
+    return modes
+}
+```
+
+### SPL (Setpoint Limits) Array
+
+The `SPL` array contains temperature limits: `[minCool, maxCool, minHeat, maxHeat]`
+
+**Example:** `SPL=[55, 95, 40, 95]` means:
+- Cool setpoint: 55-95°F
+- Heat setpoint: 40-95°F
+
+These values are used in Home Assistant discovery for `min_temp` and `max_temp`.
+
+### Write Retry with Delays
+
+BLE write operations can fail on first attempt. The plugin implements retry logic:
+
+```kotlin
+private fun writeJsonCommand(command: JSONObject) {
+    mainHandler.postDelayed({
+        writeAttempt(command, attempt = 1, maxAttempts = 3)
+    }, 100)  // 100ms initial delay
+}
+
+private fun writeAttempt(command: JSONObject, attempt: Int, maxAttempts: Int) {
+    val success = writeCharacteristic(jsonCmdCharacteristic, commandBytes)
+    
+    if (!success && attempt < maxAttempts) {
+        val backoffDelay = 200L * attempt  // Exponential backoff
+        mainHandler.postDelayed({
+            writeAttempt(command, attempt + 1, maxAttempts)
+        }, backoffDelay)
+    }
+}
+```
+
 ### JSON Command Format
 
 All commands are plaintext JSON strings written to the RX characteristic.
@@ -880,20 +978,34 @@ private fun getHvacMode(mode: Int, systemPower: Boolean): String {
 
 #### Climate Entity Discovery
 
+Discovery uses actual device capabilities from config response:
+
 ```kotlin
 private fun publishDiscovery(zone: Int, totalZones: Int) {
     val zoneName = if (totalZones > 1) "Zone $zone" else "Climate"
     val uniqueId = "easytouch_${serialNumber}_zone$zone"
     
+    // Use actual modes from MAV bitmask (from Get Config response)
+    val zoneConfig = zoneConfigs[zone]
+    val supportedModes = if (zoneConfig != null && zoneConfig.availableModesBitmask != 0) {
+        getModesFromBitmask(zoneConfig.availableModesBitmask)
+    } else {
+        listOf("off", "heat", "cool", "auto", "fan_only", "dry")  // Fallback
+    }
+    
+    // Use actual temp limits from SPL array
+    val minTemp = zoneConfig?.minHeatSetpoint ?: 60
+    val maxTemp = zoneConfig?.maxCoolSetpoint ?: 90
+    
     val discovery = JSONObject().apply {
         put("name", zoneName)
-        put("object_id", uniqueId)  // Prevents entity ID duplication
+        put("object_id", uniqueId)
         put("unique_id", uniqueId)
-        put("modes", JSONArray(listOf("off", "heat", "cool", "heat_cool", "fan_only")))
+        put("modes", JSONArray(supportedModes))  // Device-specific modes
         put("fan_modes", JSONArray(listOf("auto", "low", "medium", "high")))
         put("temperature_unit", "F")
-        put("min_temp", 50)
-        put("max_temp", 99)
+        put("min_temp", minTemp)
+        put("max_temp", maxTemp)
         // ... state/command topics
     }
 }
@@ -901,30 +1013,40 @@ private fun publishDiscovery(zone: Int, totalZones: Int) {
 
 #### State Publishing
 
+State includes current and target temperatures. For Auto (heat_cool) mode, both high/low setpoints are published:
+
 ```kotlin
 private fun publishZoneState(zone: Int) {
-    val state = JSONObject().apply {
-        put("current_temperature", ambientTemp)
-        put("temperature", setpointTemp)
-        put("mode", getHvacMode(mode, systemPower))
-        put("fan_mode", getFanMode(fanSpeed))
-        put("action", if (isRunning) getAction(mode) else "idle")
+    val stateTopic = "$baseTopic/zone_$zone/state"
+    
+    // Determine which temps to publish based on mode
+    val (targetTemp, targetTempHigh, targetTempLow) = when (mode) {
+        11 -> Triple(null, coolSetpoint, heatSetpoint)  // Auto mode: high/low
+        2 -> Triple(coolSetpoint, null, null)           // Cool mode
+        4 -> Triple(heatSetpoint, null, null)           // Heat mode
+        else -> Triple(null, null, null)                // Off/Fan
     }
     
-    mqttPublisher.publishState(stateTopic, state.toString(), true)
+    // Publish individual topics (HA climate needs separate topics)
+    mqttPublisher.publishState("$stateTopic/temperature", targetTemp?.toString() ?: "None", true)
+    mqttPublisher.publishState("$stateTopic/temperature_high", targetTempHigh?.toString() ?: "None", true)
+    mqttPublisher.publishState("$stateTopic/temperature_low", targetTempLow?.toString() ?: "None", true)
+    mqttPublisher.publishState("$stateTopic/current_temperature", ambientTemp.toString(), true)
+    mqttPublisher.publishState("$stateTopic/mode", getHvacMode(mode, systemPower), true)
+    mqttPublisher.publishState("$stateTopic/fan_mode", getFanMode(fanSpeed), true)
+    mqttPublisher.publishState("$stateTopic/action", if (isRunning) getAction(mode) else "idle", true)
 }
 ```
 
+**Note:** Publishing "None" to unused temperature topics allows HA to properly hide the irrelevant setpoint UI elements.
+
 ### Command Handling
+
+Commands use the "Change" format with a Changes object containing all fields to modify:
 
 ```kotlin
 override fun handleCommand(commandTopic: String, payload: String): Result<Unit> {
     return when {
-        commandTopic.endsWith("/temperature/set") -> {
-            val temp = payload.toIntOrNull() ?: return Result.failure(...)
-            writeCommand("""{"Type":"Set Setpoint Zone 1","SetpointTemp":$temp}""")
-            Result.success(Unit)
-        }
         commandTopic.endsWith("/mode/set") -> {
             val modeValue = when (payload.lowercase()) {
                 "off" -> 0
@@ -934,13 +1056,41 @@ override fun handleCommand(commandTopic: String, payload: String): Result<Unit> 
                 "heat_cool", "auto" -> 11
                 else -> return Result.failure(...)
             }
-            writeCommand("""{"Type":"Set Hvac Mode","Mode":$modeValue}""")
+            // CRITICAL: Include power=1 for modes other than off
+            val command = JSONObject().apply {
+                put("Type", "Change")
+                put("Changes", JSONObject().apply {
+                    put("zone", zoneNum)
+                    put("mode", modeValue)
+                    put("power", if (modeValue == 0) 0 else 1)  // Required!
+                })
+            }
+            writeJsonCommand(command)
             Result.success(Unit)
         }
-        // ... fan_mode handling
+        commandTopic.endsWith("/temperature/set") -> {
+            val temp = payload.toIntOrNull() ?: return Result.failure(...)
+            val setpointKey = when (currentMode) {
+                2 -> "cool_sp"
+                4 -> "heat_sp"
+                else -> "cool_sp"
+            }
+            val command = JSONObject().apply {
+                put("Type", "Change")
+                put("Changes", JSONObject().apply {
+                    put("zone", zoneNum)
+                    put(setpointKey, temp)
+                })
+            }
+            writeJsonCommand(command)
+            Result.success(Unit)
+        }
+        // ... fan_mode, temperature_high, temperature_low handling
     }
 }
 ```
+
+**CRITICAL:** Mode change commands MUST include `"power": 1` or the thermostat won't actually change modes.
 
 ### Key Differences from OneControl
 
@@ -949,9 +1099,11 @@ override fun handleCommand(commandTopic: String, payload: String): Result<Unit> 
 | Protocol | Binary + COBS + CRC + TEA encryption | Plain JSON strings |
 | Authentication | 32-round TEA encryption | Simple password JSON |
 | Status Updates | Event-driven (notifications) | Polling required (4s interval) |
+| Capability Discovery | Device catalog from GetDevices | MAV bitmask from Get Config |
 | Service UUID | Custom (0x0010, 0x0030) | Nordic UART (NUS) |
 | Entity Types | Switches, lights, covers, HVAC, tanks | Climate only |
 | Multi-device | Gateway manages many devices | Single thermostat (up to 4 zones) |
+| Write Reliability | Generally reliable | Requires retry with delays |
 
 ---
 

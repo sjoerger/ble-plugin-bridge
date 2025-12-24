@@ -111,6 +111,23 @@ interface BleDevicePlugin {
     fun getMqttBaseTopic(device: BluetoothDevice): String
     
     /**
+     * Get the MQTT command topic pattern for subscribing to commands.
+     * 
+     * Default pattern is "{baseTopic}/command/#" which works for simple devices.
+     * Plugins with hierarchical topics (like zones) should override this.
+     * 
+     * Example patterns:
+     * - "onecontrol/24dcc3ed1e0a/command/#" (simple)
+     * - "easytouch/EC:C9:FF:B1:24:1E/+/command/#" (with zone wildcard)
+     * 
+     * @param device The device
+     * @return MQTT topic pattern for command subscription
+     */
+    fun getCommandTopicPattern(device: BluetoothDevice): String {
+        return "${getMqttBaseTopic(device)}/command/#"
+    }
+    
+    /**
      * Get Home Assistant MQTT Discovery payloads for this device.
      * 
      * Called after successful connection to publish device entities.

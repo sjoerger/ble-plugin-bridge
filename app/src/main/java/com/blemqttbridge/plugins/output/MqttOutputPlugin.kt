@@ -72,11 +72,16 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
                     
                     override fun messageArrived(topic: String, message: MqttMessage) {
                         val payload = String(message.payload)
-                        Log.d(TAG, "Message arrived: $topic = $payload")
+                        Log.w(TAG, "🚨 MESSAGE ARRIVED: $topic = $payload")
                         
                         // Find matching callback
+                        Log.w(TAG, "🚨 Checking ${commandCallbacks.size} callback patterns")
                         commandCallbacks.forEach { (pattern, callback) ->
-                            if (topic.matches(Regex(pattern.replace("+", "[^/]+").replace("#", ".*")))) {
+                            val regex = Regex(pattern.replace("+", "[^/]+").replace("#", ".*"))
+                            val matches = topic.matches(regex)
+                            Log.w(TAG, "🚨 Pattern '$pattern' matches '$topic': $matches")
+                            if (matches) {
+                                Log.w(TAG, "🚨 Invoking callback for: $topic")
                                 callback(topic, payload)
                             }
                         }
@@ -151,16 +156,23 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     ) = suspendCancellableCoroutine<Unit> { continuation ->
         try {
             val fullPattern = "$_topicPrefix/$topicPattern"
+            Log.i(TAG, "📢 subscribeToCommands called: pattern=$fullPattern, mqttClient=${mqttClient != null}, connected=${mqttClient?.isConnected}")
             commandCallbacks[fullPattern] = callback
+            
+            if (mqttClient == null) {
+                Log.e(TAG, "❌ Cannot subscribe - mqttClient is null!")
+                continuation.resumeWithException(Exception("MQTT client is null"))
+                return@suspendCancellableCoroutine
+            }
             
             mqttClient?.subscribe(fullPattern, QOS, null, object : IMqttActionListener {
                 override fun onSuccess(asyncActionToken: IMqttToken?) {
-                    Log.i(TAG, "Subscribed to: $fullPattern")
+                    Log.i(TAG, "✅ Subscribed to: $fullPattern")
                     continuation.resume(Unit)
                 }
                 
                 override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                    Log.e(TAG, "Subscribe failed: $fullPattern", exception)
+                    Log.e(TAG, "❌ Subscribe failed: $fullPattern", exception)
                     continuation.resumeWithException(
                         exception ?: Exception("Subscribe failed")
                     )
