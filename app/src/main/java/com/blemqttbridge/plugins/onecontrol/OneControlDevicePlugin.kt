@@ -1308,22 +1308,22 @@ class OneControlGattCallback(
             lastKnownDimmableBrightness[key] = brightness
         }
         
-        // Topic paths - publishState adds prefix, so use relative paths
-        val baseTopic = "onecontrol/${device.address}"
-        val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
-        val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
-        val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
-        
-        // Publish HA discovery if not already done
+        // Use centralized publishing for discovery and state
         val keyHex = "%02x%02x".format(tableId, deviceId)
-        val discoveryKey = "light_$keyHex"
-        val friendlyName = getDeviceFriendlyName(tableId, deviceId, "Light")
-        if (haDiscoveryPublished.add(discoveryKey)) {
-            Log.i(TAG, "📢 Publishing HA discovery for dimmable light $tableId:$deviceId ($friendlyName)")
-            val deviceAddr = (tableId shl 8) or deviceId
-            // Discovery payload needs full topic paths
-            val prefix = mqttPublisher.topicPrefix
-            val discovery = HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
+        publishEntityState(
+            entityType = EntityType.LIGHT,
+            tableId = tableId,
+            deviceId = deviceId,
+            discoveryKey = "light_$keyHex",
+            state = mapOf(
+                "state" to if (isOn) "ON" else "OFF",
+                "brightness" to brightness.toString()
+            )
+        ) { friendlyName, deviceAddr, prefix, baseTopic ->
+            val stateTopic = "$baseTopic/device/$tableId/$deviceId/state"
+            val brightnessTopic = "$baseTopic/device/$tableId/$deviceId/brightness"
+            val commandTopic = "$baseTopic/command/dimmable/$tableId/$deviceId"
+            HomeAssistantMqttDiscovery.getDimmableLightDiscovery(
                 gatewayMac = device.address,
                 deviceAddr = deviceAddr,
                 deviceName = friendlyName,
@@ -1332,14 +1332,7 @@ class OneControlGattCallback(
                 brightnessTopic = "$prefix/$brightnessTopic",
                 appVersion = appVersion
             )
-            // publishDiscovery uses full path (no prefix added)
-            val discoveryTopic = "$prefix/light/onecontrol_ble_${device.address.replace(":", "").lowercase()}/light_$keyHex/config"
-            mqttPublisher.publishDiscovery(discoveryTopic, discovery.toString())
         }
-        
-        // Publish state (relative path, prefix added by publishState)
-        mqttPublisher.publishState(stateTopic, if (isOn) "ON" else "OFF", true)
-        mqttPublisher.publishState(brightnessTopic, brightness.toString(), true)
     }
     
     /**
