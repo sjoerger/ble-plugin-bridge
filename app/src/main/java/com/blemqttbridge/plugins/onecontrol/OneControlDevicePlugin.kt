@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
+import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.onecontrol.protocol.TeaEncryption
@@ -177,6 +178,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     override fun destroy() {
         Log.i(TAG, "Destroying OneControl Device Plugin")
+        gattCallback = null
     }
 }
 

@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
+import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.easytouch.protocol.EasyTouchConstants
@@ -70,13 +71,13 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
         
         // Match by configured MAC address
         if (thermostatMac.isNotEmpty() && deviceAddress.equals(thermostatMac, ignoreCase = true)) {
-            Log.d(TAG, "Device matched by MAC: $deviceAddress")
+            DebugLog.d(TAG, "Device matched by MAC: $deviceAddress")
             return true
         }
         
         // Match by device name prefix
         if (deviceName?.startsWith(EasyTouchConstants.DEVICE_NAME_PREFIX, ignoreCase = true) == true) {
-            Log.d(TAG, "Device matched by name: $deviceName")
+            DebugLog.d(TAG, "Device matched by name: $deviceName")
             return true
         }
         
@@ -85,7 +86,7 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
         if (advertisedServices != null) {
             for (uuid in advertisedServices) {
                 if (uuid.uuid == EasyTouchConstants.SERVICE_UUID) {
-                    Log.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
+                    DebugLog.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
                     return true
                 }
             }
@@ -223,11 +224,11 @@ class EasyTouchGattCallback(
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isAuthenticated) {
-                Log.d(TAG, "Polling stopped: active=$isPollingActive, auth=$isAuthenticated")
+                DebugLog.d(TAG, "Polling stopped: active=$isPollingActive, auth=$isAuthenticated")
                 return
             }
             
-            Log.d(TAG, "📡 Polling status...")
+            DebugLog.d(TAG, "Polling status...")
             requestStatus(zone = 0)
             
             // Schedule next poll in 4 seconds (same as official app)
@@ -251,7 +252,7 @@ class EasyTouchGattCallback(
         
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
-                Log.i(TAG, "✅ Connected to ${device.address}")
+                Log.i(TAG, "Connected to ${device.address}")
                 this.gatt = gatt
                 publishAvailability(true)
                 publishDiagnosticsDiscovery()
@@ -263,7 +264,7 @@ class EasyTouchGattCallback(
                 }, EasyTouchConstants.SERVICE_DISCOVERY_DELAY_MS)
             }
             BluetoothProfile.STATE_DISCONNECTED -> {
-                Log.w(TAG, "❌ Disconnected from ${device.address}")
+                Log.w(TAG, "Disconnected from ${device.address}")
                 stopStatusPolling()  // Stop polling on disconnect
                 publishAvailability(false)
                 publishDiagnosticsState(isConnected = false)
@@ -280,7 +281,7 @@ class EasyTouchGattCallback(
             return
         }
         
-        Log.i(TAG, "✅ Services discovered")
+        Log.i(TAG, "Services discovered")
         
         // Try to read Device Information Service (0x180A) for model/firmware info
         readDeviceInformationService(gatt)
@@ -302,7 +303,7 @@ class EasyTouchGattCallback(
             return
         }
         
-        Log.i(TAG, "✅ All characteristics found")
+        Log.i(TAG, "All characteristics found")
         
         // Start authentication (or device info reading if available)
         mainHandler.postDelayed({
@@ -321,12 +322,12 @@ class EasyTouchGattCallback(
     private fun readDeviceInformationService(gatt: BluetoothGatt) {
         val deviceInfoService = gatt.getService(EasyTouchConstants.DEVICE_INFO_SERVICE_UUID)
         if (deviceInfoService == null) {
-            Log.i(TAG, "ℹ️ Device Information Service (0x180A) not available")
+            Log.i(TAG, "Device Information Service (0x180A) not available")
             deviceInfoReadComplete = true
             return
         }
         
-        Log.i(TAG, "📋 Found Device Information Service, queuing characteristic reads...")
+        Log.i(TAG, "Found Device Information Service, queuing characteristic reads...")
         
         // Queue all available characteristics for reading
         deviceInfoCharsToRead.clear()
@@ -350,7 +351,7 @@ class EasyTouchGattCallback(
             deviceInfoCharsToRead.add(it)
         }
         
-        Log.i(TAG, "📋 Found ${deviceInfoCharsToRead.size} device info characteristics to read")
+        Log.i(TAG, "Found ${deviceInfoCharsToRead.size} device info characteristics to read")
         
         if (deviceInfoCharsToRead.isEmpty()) {
             deviceInfoReadComplete = true
@@ -362,7 +363,7 @@ class EasyTouchGattCallback(
      */
     private fun readNextDeviceInfoChar(gatt: BluetoothGatt) {
         if (deviceInfoCharsToRead.isEmpty()) {
-            Log.i(TAG, "✅ Device info reading complete: manufacturer=$bleManufacturerName, model=$bleModelNumber, serial=$bleSerialNumber, hw=$bleHardwareRevision, fw=$bleFirmwareRevision, sw=$bleSoftwareRevision")
+            Log.i(TAG, "Device info reading complete: manufacturer=$bleManufacturerName, model=$bleModelNumber, serial=$bleSerialNumber, hw=$bleHardwareRevision, fw=$bleFirmwareRevision, sw=$bleSoftwareRevision")
             deviceInfoReadComplete = true
             authenticate()
             return
@@ -383,11 +384,11 @@ class EasyTouchGattCallback(
      */
     private fun startStatusPolling() {
         if (isPollingActive) {
-            Log.d(TAG, "Polling already active")
+            DebugLog.d(TAG, "Polling already active")
             return
         }
         
-        Log.i(TAG, "🔄 Starting status polling loop (${STATUS_POLL_INTERVAL_MS}ms interval)")
+        Log.i(TAG, "Starting status polling loop (${STATUS_POLL_INTERVAL_MS}ms interval)")
         isPollingActive = true
         publishDiagnosticsState(isConnected = true)
         
@@ -402,7 +403,7 @@ class EasyTouchGattCallback(
      * Called on disconnect or when connection is lost.
      */
     private fun stopStatusPolling() {
-        Log.i(TAG, "⏹ Stopping status polling loop")
+        Log.i(TAG, "Stopping status polling loop")
         isPollingActive = false
         mainHandler.removeCallbacks(statusPollRunnable)
     }
@@ -413,11 +414,11 @@ class EasyTouchGattCallback(
      * Matches official app's "StartIgnoreStatus" behavior.
      */
     private fun suppressStatusUpdates(durationMs: Long) {
-        Log.d(TAG, "🚫 Suppressing status updates for ${durationMs}ms")
+        DebugLog.d(TAG, "Suppressing status updates for ${durationMs}ms")
         isStatusSuppressed = true
         mainHandler.postDelayed({
             isStatusSuppressed = false
-            Log.d(TAG, "✅ Status updates resumed")
+            DebugLog.d(TAG, "Status updates resumed")
         }, durationMs)
     }
     
@@ -446,14 +447,14 @@ class EasyTouchGattCallback(
         status: Int
     ) {
         val uuid = characteristic.uuid
-        Log.d(TAG, "Characteristic write complete: $uuid, status=$status")
+        DebugLog.d(TAG, "Characteristic write complete: $uuid, status=$status")
         
         when (uuid) {
             EasyTouchConstants.PASSWORD_CMD_UUID -> {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "✅ Password written successfully")
+                    Log.i(TAG, "Password written successfully")
                     isAuthenticated = true
-                    Log.i(TAG, "🎉 Fully authenticated! Requesting device config...")
+                    Log.i(TAG, "Fully authenticated! Requesting device config...")
                     // Request config first to get available modes, then start polling
                     requestConfig(zone = 0)
                 } else {
@@ -462,7 +463,7 @@ class EasyTouchGattCallback(
             }
             EasyTouchConstants.JSON_CMD_UUID -> {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, "✅ JSON command written successfully")
+                    DebugLog.d(TAG, "JSON command written successfully")
                     // Read response after a short delay (no notifications available)
                     mainHandler.postDelayed({
                         readJsonResponse()
@@ -482,7 +483,7 @@ class EasyTouchGattCallback(
         val char = jsonReturnChar ?: return
         val g = gatt ?: return
         
-        Log.d(TAG, "Reading jsonReturn characteristic...")
+        DebugLog.d(TAG, "Reading jsonReturn characteristic...")
         if (!g.readCharacteristic(char)) {
             Log.e(TAG, "Failed to initiate read on jsonReturn")
         }
@@ -511,37 +512,37 @@ class EasyTouchGattCallback(
         when (uuid) {
             EasyTouchConstants.MANUFACTURER_NAME_UUID -> {
                 bleManufacturerName = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Manufacturer: $bleManufacturerName")
+                Log.i(TAG, "BLE Manufacturer: $bleManufacturerName")
                 readNextDeviceInfoChar(gatt)
                 return
             }
             EasyTouchConstants.MODEL_NUMBER_UUID -> {
                 bleModelNumber = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Model: $bleModelNumber")
+                Log.i(TAG, "BLE Model: $bleModelNumber")
                 readNextDeviceInfoChar(gatt)
                 return
             }
             EasyTouchConstants.SERIAL_NUMBER_UUID -> {
                 bleSerialNumber = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Serial: $bleSerialNumber")
+                Log.i(TAG, "BLE Serial: $bleSerialNumber")
                 readNextDeviceInfoChar(gatt)
                 return
             }
             EasyTouchConstants.HARDWARE_REVISION_UUID -> {
                 bleHardwareRevision = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Hardware Rev: $bleHardwareRevision")
+                Log.i(TAG, "BLE Hardware Rev: $bleHardwareRevision")
                 readNextDeviceInfoChar(gatt)
                 return
             }
             EasyTouchConstants.FIRMWARE_REVISION_UUID -> {
                 bleFirmwareRevision = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Firmware Rev: $bleFirmwareRevision")
+                Log.i(TAG, "BLE Firmware Rev: $bleFirmwareRevision")
                 readNextDeviceInfoChar(gatt)
                 return
             }
             EasyTouchConstants.SOFTWARE_REVISION_UUID -> {
                 bleSoftwareRevision = characteristic.getStringValue(0)
-                Log.i(TAG, "📋 BLE Software Rev: $bleSoftwareRevision")
+                Log.i(TAG, "BLE Software Rev: $bleSoftwareRevision")
                 readNextDeviceInfoChar(gatt)
                 return
             }
@@ -558,12 +559,12 @@ class EasyTouchGattCallback(
      */
     private fun processReceivedData(data: ByteArray?) {
         if (data == null || data.isEmpty()) {
-            Log.d(TAG, "Empty response from jsonReturn")
+            DebugLog.d(TAG, "Empty response from jsonReturn")
             return
         }
         
         val chunk = String(data, StandardCharsets.UTF_8)
-        Log.d(TAG, "Received data: $chunk")
+        DebugLog.d(TAG, "Received data: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -576,7 +577,7 @@ class EasyTouchGattCallback(
             handleJsonResponse(json)
         } catch (e: Exception) {
             // Incomplete JSON - might need another read
-            Log.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
+            DebugLog.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
             // Schedule another read to get more data
             mainHandler.postDelayed({
                 readJsonResponse()
@@ -596,7 +597,7 @@ class EasyTouchGattCallback(
             put("Type", "Get Config")
             put("Zone", zone)
         }
-        Log.i(TAG, "📋 Requesting config for zone $zone...")
+        Log.i(TAG, "Requesting config for zone $zone...")
         writeJsonCommand(command)
     }
     
@@ -630,7 +631,7 @@ class EasyTouchGattCallback(
             val success = g.writeCharacteristic(char)
             
             if (success) {
-                Log.d(TAG, "Writing JSON command (attempt ${retryCount + 1}): $jsonString")
+                DebugLog.d(TAG, "Writing JSON command (attempt ${retryCount + 1}): $jsonString")
             } else {
                 Log.e(TAG, "Failed to write JSON command (attempt ${retryCount + 1})")
                 // Retry up to 2 more times with increasing delays
@@ -654,7 +655,7 @@ class EasyTouchGattCallback(
         if (data == null || data.isEmpty()) return
         
         val chunk = String(data, StandardCharsets.UTF_8)
-        Log.d(TAG, "Received chunk: $chunk")
+        DebugLog.d(TAG, "Received chunk: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -667,12 +668,12 @@ class EasyTouchGattCallback(
             handleJsonResponse(json)
         } catch (e: Exception) {
             // Incomplete JSON, wait for more data
-            Log.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
+            DebugLog.d(TAG, "Waiting for more data (buffer: ${responseBuffer.length} chars)")
         }
     }
     
     private fun handleJsonResponse(json: JSONObject) {
-        Log.d(TAG, "Received JSON: ${json.toString().take(200)}...")
+        DebugLog.d(TAG, "Received JSON: ${json.toString().take(200)}...")
         
         val type = json.optString("Type", "")
         val responseType = json.optString("RT", "")  // Response type field
@@ -689,10 +690,10 @@ class EasyTouchGattCallback(
                 
                 // Skip publishing if status updates are suppressed (command in progress)
                 if (isStatusSuppressed) {
-                    Log.d(TAG, "⏸️ Status update suppressed (command in progress)")
+                    DebugLog.d(TAG, "Status update suppressed (command in progress)")
                 } else {
                     publishState(state)
-                    Log.i(TAG, "✅ Status update received and published")
+                    Log.i(TAG, "Status update received and published")
                 }
             }
             // Legacy format: Type="Status"
@@ -764,7 +765,7 @@ class EasyTouchGattCallback(
         
         // Log discovered capabilities
         val supportedModes = getModesFromBitmask(mav)
-        Log.i(TAG, "📋 Zone $zone config: MAV=0x${mav.toString(16)} (${mav.toString(2).padStart(16, '0')})")
+        Log.i(TAG, "Zone $zone config: MAV=0x${mav.toString(16)} (${mav.toString(2).padStart(16, '0')})")
         Log.i(TAG, "   Supported modes: $supportedModes")
         Log.i(TAG, "   Setpoint limits: cool=$minCool-$maxCool, heat=$minHeat-$maxHeat")
         
@@ -775,7 +776,7 @@ class EasyTouchGattCallback(
             }, 300)
         } else {
             // All zones configured, now start polling
-            Log.i(TAG, "✅ All zone configs received. Starting status polling...")
+            Log.i(TAG, "All zone configs received. Starting status polling...")
             startStatusPolling()
         }
     }
@@ -828,7 +829,7 @@ class EasyTouchGattCallback(
         var deviceInfoUpdated = false
         if (serialNumber != null && bleSerialNumber == null) {
             bleSerialNumber = serialNumber
-            Log.i(TAG, "📋 Parsed Serial Number from status: $serialNumber")
+            Log.i(TAG, "Parsed Serial Number from status: $serialNumber")
             
             // Derive model number from first 3 chars of serial number
             // Based on official EasyTouch app: Serial_number.substring(0, 3) determines model
@@ -836,23 +837,23 @@ class EasyTouchGattCallback(
             // 350 = Dometic CCC, 351/352 = EasyTouch RV, 353 = Furrion, 354-357/359 = Other variants
             if (serialNumber.length >= 3 && deviceModel == null) {
                 deviceModel = serialNumber.take(3)
-                Log.i(TAG, "📋 Derived model from serial prefix: $deviceModel")
+                Log.i(TAG, "Derived model from serial prefix: $deviceModel")
             }
             deviceInfoUpdated = true
         }
         if (firmwareRevision != null && bleFirmwareRevision == null) {
             bleFirmwareRevision = firmwareRevision
-            Log.i(TAG, "📋 Parsed Firmware Revision from status: $firmwareRevision")
+            Log.i(TAG, "Parsed Firmware Revision from status: $firmwareRevision")
             deviceInfoUpdated = true
         }
         if (deviceType != null && bleModelNumber == null) {
             bleModelNumber = deviceType
-            Log.i(TAG, "📋 Parsed Device Type from status: $deviceType")
+            Log.i(TAG, "Parsed Device Type from status: $deviceType")
             deviceInfoUpdated = true
         }
         if (configIndex != null && bleHardwareRevision == null) {
             bleHardwareRevision = configIndex.toString()
-            Log.i(TAG, "📋 Parsed Config Index from status: $configIndex")
+            Log.i(TAG, "Parsed Config Index from status: $configIndex")
             deviceInfoUpdated = true
         }
         
@@ -870,7 +871,7 @@ class EasyTouchGattCallback(
         } else {
             true  // Default to on if PRM not present
         }
-        Log.d(TAG, "System power: $systemPower (PRM[1]=${prmArray?.optInt(1, 0) ?: "N/A"})")
+        DebugLog.d(TAG, "System power: $systemPower (PRM[1]=${prmArray?.optInt(1, 0) ?: "N/A"})")
         
         val availableZones = mutableListOf<Int>()
         val zones = mutableMapOf<Int, ZoneState>()
@@ -1004,7 +1005,7 @@ class EasyTouchGattCallback(
         val action = getAction(state)
         mqttPublisher.publishState("$zoneTopic/state/action", action, true)
         
-        Log.d(TAG, "Published zone $zoneNum: temp=${state.ambientTemperature}°F, mode=$mode, fan=$fanMode, action=$action")
+        DebugLog.d(TAG, "Published zone $zoneNum: temp=${state.ambientTemperature}°F, mode=$mode, fan=$fanMode, action=$action")
     }
     
     private fun fanValueToString(value: Int, isFanOnly: Boolean): String {
@@ -1041,7 +1042,7 @@ class EasyTouchGattCallback(
         // Use publishState for per-device availability (publishAvailability is for global status)
         val payload = if (online) "online" else "offline"
         mqttPublisher.publishState("$baseTopic/availability", payload, true)
-        Log.d(TAG, "Published availability: $payload to $baseTopic/availability")
+        DebugLog.d(TAG, "Published availability: $payload to $baseTopic/availability")
     }
     
     // ===== DISCOVERY PUBLISHING =====
@@ -1156,7 +1157,7 @@ class EasyTouchGattCallback(
         
         // Extract zone from topic
         val zone = extractZoneFromTopic(commandTopic)
-        Log.d(TAG, "Command for zone $zone: $commandTopic = $payload")
+        DebugLog.d(TAG, "Command for zone $zone: $commandTopic = $payload")
         
         return try {
             when {
@@ -1349,7 +1350,7 @@ class EasyTouchGattCallback(
             }.toString()
             
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
-            Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
+            Log.i(TAG, "Published diagnostic discovery: $objectId")
         }
         
         // Text diagnostic sensors for device info (Model, Serial, Firmware, Device Type, Config Index)
@@ -1376,7 +1377,7 @@ class EasyTouchGattCallback(
             }.toString()
             
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
-            Log.i(TAG, "📡 Published diagnostic sensor discovery: ${sensor.objectId}")
+            Log.i(TAG, "Published diagnostic sensor discovery: ${sensor.objectId}")
         }
         
         diagnosticsDiscoveryPublished = true
@@ -1409,7 +1410,7 @@ class EasyTouchGattCallback(
             dataHealthy = dataHealthy
         )
         
-        Log.d(TAG, "📡 Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
+        DebugLog.d(TAG, "Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
     }
 }
 

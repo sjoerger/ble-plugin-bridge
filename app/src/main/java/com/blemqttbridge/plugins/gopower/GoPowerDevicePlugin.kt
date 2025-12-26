@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
+import com.blemqttbridge.util.DebugLog
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.plugins.gopower.protocol.GoPowerConstants
@@ -88,7 +89,7 @@ class GoPowerDevicePlugin : BleDevicePlugin {
         if (advertisedServices != null) {
             for (uuid in advertisedServices) {
                 if (uuid.uuid == GoPowerConstants.SERVICE_UUID) {
-                    Log.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
+                    DebugLog.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
                     return true
                 }
             }
@@ -196,11 +197,11 @@ class GoPowerGattCallback(
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isConnected) {
-                Log.d(TAG, "Polling stopped: active=$isPollingActive, connected=$isConnected")
+                DebugLog.d(TAG, "Polling stopped: active=$isPollingActive, connected=$isConnected")
                 return
             }
             
-            Log.d(TAG, "📡 Polling status...")
+            DebugLog.d(TAG, "Polling status...")
             pollStatus()
             
             // Schedule next poll
@@ -223,7 +224,7 @@ class GoPowerGattCallback(
         
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
-                Log.i(TAG, "✅ Connected to ${device.address}")
+                Log.i(TAG, "Connected to ${device.address}")
                 this.gatt = gatt
                 isConnected = true
                 publishAvailability(true)
@@ -236,7 +237,7 @@ class GoPowerGattCallback(
                 }, GoPowerConstants.SERVICE_DISCOVERY_DELAY_MS)
             }
             BluetoothProfile.STATE_DISCONNECTED -> {
-                Log.w(TAG, "❌ Disconnected from ${device.address}")
+                Log.w(TAG, "Disconnected from ${device.address}")
                 stopStatusPolling()
                 isConnected = false
                 publishAvailability(false)
@@ -252,7 +253,7 @@ class GoPowerGattCallback(
             return
         }
         
-        Log.i(TAG, "✅ Services discovered")
+        Log.i(TAG, "Services discovered")
         
         // Find GoPower service
         val service = gatt.getService(GoPowerConstants.SERVICE_UUID)
@@ -270,7 +271,7 @@ class GoPowerGattCallback(
             return
         }
         
-        Log.i(TAG, "✅ All characteristics found")
+        Log.i(TAG, "All characteristics found")
         
         // Enable notifications on FFF1
         mainHandler.postDelayed({
@@ -316,7 +317,7 @@ class GoPowerGattCallback(
     ) {
         if (descriptor.uuid == GoPowerConstants.CCCD_UUID) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "✅ Notifications enabled")
+                Log.i(TAG, "Notifications enabled")
                 // No authentication needed - start polling immediately
                 publishDiagnosticsState()
                 startStatusPolling()
@@ -334,7 +335,7 @@ class GoPowerGattCallback(
             return
         }
         
-        Log.i(TAG, "🔄 Starting status polling loop (${GoPowerConstants.STATUS_POLL_INTERVAL_MS}ms interval)")
+        Log.i(TAG, "Starting status polling loop (${GoPowerConstants.STATUS_POLL_INTERVAL_MS}ms interval)")
         isPollingActive = true
         publishDiagnosticsState()
         
@@ -345,7 +346,7 @@ class GoPowerGattCallback(
     }
     
     private fun stopStatusPolling() {
-        Log.i(TAG, "⏹ Stopping status polling loop")
+        Log.i(TAG, "Stopping status polling loop")
         isPollingActive = false
         mainHandler.removeCallbacks(statusPollRunnable)
     }
@@ -377,7 +378,7 @@ class GoPowerGattCallback(
         status: Int
     ) {
         if (status == BluetoothGatt.GATT_SUCCESS) {
-            Log.d(TAG, "✅ Characteristic write complete: ${characteristic.uuid}")
+            DebugLog.d(TAG, "Characteristic write complete: ${characteristic.uuid}")
         } else {
             Log.e(TAG, "Characteristic write failed: ${characteristic.uuid}, status=$status")
         }
@@ -393,7 +394,7 @@ class GoPowerGattCallback(
         if (data == null || data.isEmpty()) return
         
         val chunk = String(data, StandardCharsets.UTF_8)
-        Log.d(TAG, "Received chunk: $chunk")
+        DebugLog.d(TAG, "Received chunk: $chunk")
         
         responseBuffer.append(chunk)
         
@@ -406,7 +407,7 @@ class GoPowerGattCallback(
             responseBuffer.clear()
             parseAndPublishStatus(bufferStr)
         } else {
-            Log.d(TAG, "Waiting for more data (have $fieldCount fields)")
+            DebugLog.d(TAG, "Waiting for more data (have $fieldCount fields)")
         }
     }
     
@@ -414,7 +415,7 @@ class GoPowerGattCallback(
      * Parse ASCII response and publish to MQTT
      */
     private fun parseAndPublishStatus(response: String) {
-        Log.d(TAG, "Parsing response: ${response.take(100)}...")
+        DebugLog.d(TAG, "Parsing response: ${response.take(100)}...")
         
         val fields = response.split(GoPowerConstants.FIELD_DELIMITER)
         if (fields.size < GoPowerConstants.EXPECTED_FIELD_COUNT) {
@@ -468,7 +469,7 @@ class GoPowerGattCallback(
                 energyTodayWh = energyToday
             )
             
-            Log.i(TAG, "📊 Parsed: PV=${solarVoltage}V ${solarCurrent}A ${solarPower}W, Batt=${batteryVoltage}V ${soc}%, Temp=${tempC}°C")
+            Log.i(TAG, "Parsed: PV=${solarVoltage}V ${solarCurrent}A ${solarPower}W, Batt=${batteryVoltage}V ${soc}%, Temp=${tempC}°C")
             
             currentState = state
             
@@ -504,7 +505,7 @@ class GoPowerGattCallback(
     private fun publishAvailability(online: Boolean) {
         val topic = "$baseTopic/availability"
         mqttPublisher.publishAvailability(topic, online)
-        Log.d(TAG, "📡 Published availability: $online")
+        DebugLog.d(TAG, "Published availability: $online")
     }
     
     private fun publishDiscovery() {
@@ -569,7 +570,7 @@ class GoPowerGattCallback(
             }.toString()
             
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
-            Log.i(TAG, "📡 Published sensor discovery: ${sensor.objectId}")
+            Log.i(TAG, "Published sensor discovery: ${sensor.objectId}")
         }
         
         // Publish reboot button discovery
@@ -588,7 +589,7 @@ class GoPowerGattCallback(
         }.toString()
         
         mqttPublisher.publishDiscovery(rebootDiscoveryTopic, rebootPayload)
-        Log.i(TAG, "📡 Published button discovery: reboot")
+        Log.i(TAG, "Published button discovery: reboot")
         
         // Subscribe to commands
         mqttPublisher.subscribeToCommands("$baseTopic/command/#") { topic, payload ->
@@ -609,7 +610,7 @@ class GoPowerGattCallback(
         mqttPublisher.publishState("$baseTopic/energy_today", state.energyTodayWh.toString(), true)
         mqttPublisher.publishState("$baseTopic/amp_hours", state.ampHours.toString(), true)
         
-        Log.d(TAG, "📡 Published state")
+        DebugLog.d(TAG, "Published state")
     }
     
     // ===== COMMAND HANDLING =====
@@ -639,14 +640,14 @@ class GoPowerGattCallback(
         val char = writeChar ?: return Result.failure(Exception("Write characteristic not available"))
         val g = gatt ?: return Result.failure(Exception("GATT not connected"))
         
-        Log.i(TAG, "🔄 Sending reboot command...")
+        Log.i(TAG, "Sending reboot command...")
         
         char.value = GoPowerConstants.REBOOT_COMMAND
         return if (g.writeCharacteristic(char)) {
-            Log.i(TAG, "✅ Reboot command sent")
+            Log.i(TAG, "Reboot command sent")
             Result.success(Unit)
         } else {
-            Log.e(TAG, "❌ Failed to send reboot command")
+            Log.e(TAG, "Failed to send reboot command")
             Result.failure(Exception("Failed to write reboot command"))
         }
     }
@@ -706,7 +707,7 @@ class GoPowerGattCallback(
             }.toString()
             
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
-            Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
+            Log.i(TAG, "Published diagnostic discovery: $objectId")
         }
         
         // Text sensors (model, serial, firmware)
@@ -723,7 +724,7 @@ class GoPowerGattCallback(
             }.toString()
             
             mqttPublisher.publishDiscovery(discoveryTopic, payload)
-            Log.i(TAG, "📡 Published diagnostic discovery: $objectId")
+            Log.i(TAG, "Published diagnostic discovery: $objectId")
         }
         
         diagnosticsDiscoveryPublished = true
@@ -752,7 +753,7 @@ class GoPowerGattCallback(
             dataHealthy = dataHealthy
         )
         
-        Log.d(TAG, "📡 Published diagnostic state: connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$deviceSerial, fw=$deviceFirmware")
+        DebugLog.d(TAG, "Published diagnostic state: connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$deviceSerial, fw=$deviceFirmware")
     }
 }
 
