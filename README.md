@@ -108,8 +108,8 @@ Special thanks to **[k3vmcd](https://github.com/k3vmcd)** and their [ha-micro-ai
 
 1. Expand "EasyTouch Settings" in the app
 2. Enter the **Thermostat MAC Address** (found in Bluetooth settings or the official app)
-3. Enter your **Thermostat Password** (default is often on a sticker on the unit)
-4. Enable the **EasyTouch** toggle, then the **BLE Service** toggle
+3. Enter your **Thermostat Password** (this is the password you use to login in the Micro-Air app)
+4. Toggle the main service off and on
 
 #### Features
 
@@ -142,7 +142,7 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 1. Expand "GoPower Settings" in the app
 2. Enter the **Controller MAC Address** (found in Bluetooth settings)
-3. Enable the **GoPower** toggle, then the **BLE Service** toggle
+3. Toggle the main service off and on
 
 **Note:** GoPower controllers do not require pairing or authentication.
 
