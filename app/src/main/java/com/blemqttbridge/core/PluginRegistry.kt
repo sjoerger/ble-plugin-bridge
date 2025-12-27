@@ -32,6 +32,7 @@ class PluginRegistry {
     
     private val mutex = Mutex()
     private val loadedBlePlugins = mutableMapOf<String, BlePluginInterface>()
+    private val loadedDevicePlugins = mutableMapOf<String, BleDevicePlugin>()
     private var outputPlugin: OutputPluginInterface? = null
     
     // Plugin factory map: pluginId -> factory function
@@ -113,15 +114,28 @@ class PluginRegistry {
     /**
      * Find which plugin can handle a discovered device.
      * Checks loaded plugins first (fast), then factory creates temporary instances.
+     * Only checks plugins that are enabled in ServiceStateManager.
      * 
      * @param device The discovered Bluetooth device
      * @param scanRecord Raw scan record data
-     * @param context Context for loading plugin config (optional but recommended)
+     * @param context Context for loading plugin config (required for enabled check)
      * @return Plugin ID if a match is found, null otherwise
      */
     fun findPluginForDevice(device: BluetoothDevice, scanRecord: ByteArray?, context: Context? = null): String? {
+        // Get enabled plugins - if no context, fall back to checking all (legacy behavior)
+        val enabledPlugins = if (context != null) {
+            ServiceStateManager.getEnabledBlePlugins(context)
+        } else {
+            null
+        }
+        
         // Check already loaded plugins first (fast path)
         for ((pluginId, plugin) in loadedBlePlugins) {
+            // Skip if not enabled (when context is available)
+            if (enabledPlugins != null && !enabledPlugins.contains(pluginId)) {
+                continue
+            }
+            
             if (plugin.canHandleDevice(device, scanRecord)) {
                 Log.d(TAG, "Device ${device.address} matches loaded plugin: $pluginId")
                 return pluginId
@@ -131,6 +145,12 @@ class PluginRegistry {
         // Check other registered plugins by creating temporary instances
         for ((pluginId, factory) in blePluginFactories) {
             if (loadedBlePlugins.containsKey(pluginId)) continue // already checked
+            
+            // Skip if not enabled (when context is available)
+            if (enabledPlugins != null && !enabledPlugins.contains(pluginId)) {
+                Log.d(TAG, "Skipping disabled plugin: $pluginId")
+                continue
+            }
             
             try {
                 val tempPlugin = factory()
@@ -216,21 +236,30 @@ class PluginRegistry {
     
     /**
      * Get a BLE device plugin (new architecture) if it implements the interface.
+     * Returns the same instance for repeated calls (singleton per plugin ID).
      * 
      * @param pluginId The plugin to check
      * @param context Android context for initialization (will load plugin if needed)
      * @return The plugin if it implements BleDevicePlugin, null otherwise
      */
     fun getDevicePlugin(pluginId: String, context: Context): BleDevicePlugin? {
+        // Check if already loaded
+        loadedDevicePlugins[pluginId]?.let {
+            return it
+        }
+        
         // Check if this plugin is registered and creates a BleDevicePlugin
         val factory = blePluginFactories[pluginId] ?: return null
         
         try {
             val plugin = factory()
-            return if (plugin is BleDevicePlugin) {
-                plugin
+            if (plugin is BleDevicePlugin) {
+                // Cache the instance so we return the same one
+                loadedDevicePlugins[pluginId] = plugin
+                Log.d(TAG, "Created and cached device plugin: $pluginId")
+                return plugin
             } else {
-                null
+                return null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error creating device plugin $pluginId", e)
@@ -262,16 +291,34 @@ class PluginRegistry {
     }
     
     /**
+     * Unload a specific device plugin.
+     * Called when plugin is being removed/disabled.
+     */
+    suspend fun unloadDevicePlugin(pluginId: String) = mutex.withLock {
+        loadedDevicePlugins[pluginId]?.let { plugin ->
+            Log.i(TAG, "Unloading device plugin: $pluginId")
+            // Device plugins don't have a cleanup method in the interface yet
+            // But we should remove the instance to allow garbage collection
+            loadedDevicePlugins.remove(pluginId)
+            Log.i(TAG, "Device plugin $pluginId removed from cache")
+            System.gc()
+        }
+    }
+    
+    /**
      * Unload all plugins and cleanup resources.
      */
     suspend fun cleanup() = mutex.withLock {
-        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins)")
+        Log.i(TAG, "Cleaning up all plugins (${loadedBlePlugins.size} BLE plugins, ${loadedDevicePlugins.size} device plugins)")
         
         for ((pluginId, plugin) in loadedBlePlugins) {
             Log.i(TAG, "Cleaning up BLE plugin: $pluginId")
             plugin.cleanup()
         }
         loadedBlePlugins.clear()
+        
+        // Clear device plugins
+        loadedDevicePlugins.clear()
         
         outputPlugin?.disconnect()
         outputPlugin = null

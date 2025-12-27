@@ -96,29 +96,18 @@ class OneControlDevicePlugin : BleDevicePlugin {
         device: BluetoothDevice,
         scanRecord: ScanRecord?
     ): Boolean {
+        // SECURITY: Only match on exact configured MAC address.
+        // This prevents connecting to neighbors' devices in RV parks.
+        // No auto-discovery by device name or service UUID.
+        
+        if (gatewayMac.isBlank()) {
+            return false  // No MAC configured = no matching
+        }
+        
         val deviceAddress = device.address
-        val deviceName = device.name
-        // Match by MAC address if configured
         if (deviceAddress.equals(gatewayMac, ignoreCase = true)) {
-            Log.d(TAG, "Device matched by MAC: $deviceAddress")
+            Log.d(TAG, "Device matched by configured MAC: $deviceAddress")
             return true
-        }
-        
-        // Match by name prefix
-        if (deviceName?.startsWith(DEVICE_NAME_PREFIX) == true) {
-            Log.d(TAG, "Device matched by name: $deviceName")
-            return true
-        }
-        
-        // Match by advertised service UUID
-        val advertisedServices = scanRecord?.serviceUuids
-        if (advertisedServices != null) {
-            for (uuid in advertisedServices) {
-                if (uuid.uuid == DATA_SERVICE_UUID || uuid.uuid == AUTH_SERVICE_UUID) {
-                    Log.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
-                    return true
-                }
-            }
         }
         
         return false

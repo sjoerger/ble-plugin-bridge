@@ -3,7 +3,6 @@ package com.blemqttbridge
 import android.app.Application
 import android.util.Log
 import com.blemqttbridge.core.PluginRegistry
-import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.plugins.device.MockBatteryPlugin
 import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.easytouch.EasyTouchDevicePlugin
@@ -57,12 +56,11 @@ class BlePluginBridgeApplication : Application() {
             MqttOutputPlugin(this@BlePluginBridgeApplication)
         }
         
-        // Ensure OneControl is always enabled (it's the required base plugin)
-        ServiceStateManager.enableBlePlugin(this, "onecontrol_v2")
+        // NOTE: Plugins are only active when user adds them via UI with a configured MAC address.
+        // No plugins are auto-enabled - this prevents connecting to neighbors' devices in RV parks.
         
         Log.i(TAG, "Plugin factory registration complete")
         Log.i(TAG, "  Available BLE plugins: ${registry.getRegisteredBlePlugins().joinToString(", ")}")
         Log.i(TAG, "  Available output plugins: ${registry.getRegisteredOutputPlugins().joinToString(", ")}")
-        Log.i(TAG, "  Enabled BLE plugins: ${ServiceStateManager.getEnabledBlePlugins(this).joinToString(", ")}")
     }
 }

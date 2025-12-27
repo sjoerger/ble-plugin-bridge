@@ -209,6 +209,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setEasyTouchEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settings.setEasyTouchEnabled(enabled)
+            // Sync with ServiceStateManager so service knows which plugins to load
+            if (enabled) {
+                ServiceStateManager.enableBlePlugin(context, "easytouch")
+            } else {
+                ServiceStateManager.disableBlePlugin(context, "easytouch")
+            }
             restartService()
         }
     }
@@ -275,31 +281,73 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
     
     fun addPlugin(pluginId: String) {
-        when (pluginId) {
-            "ble_scanner" -> setBleScannerEnabled(true)
-            "easytouch" -> {
-                setEasyTouchEnabled(true)
-                ServiceStateManager.enableBlePlugin(context, "easytouch")
+        viewModelScope.launch {
+            android.util.Log.i("SettingsViewModel", "Adding plugin: $pluginId")
+            
+            // Map UI plugin ID to internal plugin ID
+            val internalPluginId = when (pluginId) {
+                "onecontrol" -> "onecontrol_v2"
+                else -> pluginId
             }
-            "gopower" -> {
-                setGoPowerEnabled(true)
-                ServiceStateManager.enableBlePlugin(context, "gopower")
+            
+            // 1. Update DataStore (for UI state)
+            when (pluginId) {
+                "ble_scanner" -> settings.setBleScannerEnabled(true)
+                "onecontrol" -> settings.setOneControlEnabled(true)
+                "easytouch" -> settings.setEasyTouchEnabled(true)
+                "gopower" -> settings.setGoPowerEnabled(true)
             }
+            
+            // 2. Update ServiceStateManager (for service to know which plugins to load)
+            ServiceStateManager.enableBlePlugin(context, internalPluginId)
+            
+            // 3. Send intent to service to load the plugin dynamically (NO restart)
+            val intent = Intent(context, BaseBleService::class.java).apply {
+                action = BaseBleService.ACTION_ADD_PLUGIN
+                putExtra(BaseBleService.EXTRA_PLUGIN_ID, pluginId)
+            }
+            context.startService(intent)
+            
+            android.util.Log.i("SettingsViewModel", "Plugin $pluginId added, service notified")
         }
         hidePluginPicker()
     }
 
     fun removePlugin(pluginId: String) {
-        when (pluginId) {
-            "ble_scanner" -> setBleScannerEnabled(false)
-            "easytouch" -> {
-                setEasyTouchEnabled(false)
-                ServiceStateManager.disableBlePlugin(context, "easytouch")
+        viewModelScope.launch {
+            android.util.Log.i("SettingsViewModel", "Removing plugin: $pluginId")
+            
+            // Map UI plugin ID to internal plugin ID
+            val internalPluginId = when (pluginId) {
+                "onecontrol" -> "onecontrol_v2"
+                else -> pluginId
             }
-            "gopower" -> {
-                setGoPowerEnabled(false)
-                ServiceStateManager.disableBlePlugin(context, "gopower")
+            
+            // 1. Tell service to clear HA discovery for this plugin
+            val clearIntent = Intent(context, BaseBleService::class.java).apply {
+                action = BaseBleService.ACTION_CLEAR_PLUGIN_DISCOVERY
+                putExtra(BaseBleService.EXTRA_PLUGIN_ID, pluginId)
             }
+            context.startService(clearIntent)
+            
+            // 2. Update DataStore (for UI state)
+            when (pluginId) {
+                "ble_scanner" -> settings.setBleScannerEnabled(false)
+                "onecontrol" -> settings.setOneControlEnabled(false)
+                "easytouch" -> settings.setEasyTouchEnabled(false)
+                "gopower" -> settings.setGoPowerEnabled(false)
+            }
+            
+            // 3. Update ServiceStateManager
+            ServiceStateManager.disableBlePlugin(context, internalPluginId)
+            
+            // Wait for discovery clearing and settings to persist
+            kotlinx.coroutines.delay(1000)
+            
+            android.util.Log.i("SettingsViewModel", "Plugin $pluginId removed, killing app")
+            
+            // 4. Kill the app - this stops the service and all BLE connections
+            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 
@@ -315,13 +363,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         context.stopService(intent)
     }
     
-    private fun restartService() {
+    private suspend fun restartService() {
+        android.util.Log.i("SettingsViewModel", "Restarting service...")
         stopService()
-        // Small delay to allow service to fully stop
-        viewModelScope.launch {
-            kotlinx.coroutines.delay(500)
-            startService()
-        }
+        // Delay to allow service to fully stop
+        kotlinx.coroutines.delay(500)
+        startService()
+        android.util.Log.i("SettingsViewModel", "Service restart initiated")
     }
     
     /**

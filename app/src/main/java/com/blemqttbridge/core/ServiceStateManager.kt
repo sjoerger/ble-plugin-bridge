@@ -91,14 +91,15 @@ object ServiceStateManager {
     /**
      * Get list of enabled BLE plugin IDs.
      * These plugins should be loaded when service starts.
-     * Defaults to "onecontrol" if no plugins have been explicitly configured.
+     * Returns empty set if no plugins have been configured.
      */
     fun getEnabledBlePlugins(context: Context): Set<String> {
         val prefs = getPrefs(context)
         // Check if plugins have ever been explicitly set
         if (!prefs.contains(KEY_ENABLED_BLE_PLUGINS)) {
-            // First run - default to onecontrol_v2 enabled
-            return setOf("onecontrol_v2")
+            // First run - no plugins enabled by default
+            // User must explicitly add plugins via UI
+            return emptySet()
         }
         val csv = prefs.getString(KEY_ENABLED_BLE_PLUGINS, "") ?: ""
         return if (csv.isEmpty()) {

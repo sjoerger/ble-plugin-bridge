@@ -66,30 +66,18 @@ class EasyTouchDevicePlugin : BleDevicePlugin {
     }
     
     override fun matchesDevice(device: BluetoothDevice, scanRecord: ScanRecord?): Boolean {
+        // SECURITY: Only match on exact configured MAC address.
+        // This prevents connecting to neighbors' devices in RV parks.
+        // No auto-discovery by device name or service UUID.
+        
+        if (thermostatMac.isBlank()) {
+            return false  // No MAC configured = no matching
+        }
+        
         val deviceAddress = device.address
-        val deviceName = device.name
-        
-        // Match by configured MAC address
-        if (thermostatMac.isNotEmpty() && deviceAddress.equals(thermostatMac, ignoreCase = true)) {
-            DebugLog.d(TAG, "Device matched by MAC: $deviceAddress")
+        if (deviceAddress.equals(thermostatMac, ignoreCase = true)) {
+            DebugLog.d(TAG, "Device matched by configured MAC: $deviceAddress")
             return true
-        }
-        
-        // Match by device name prefix
-        if (deviceName?.startsWith(EasyTouchConstants.DEVICE_NAME_PREFIX, ignoreCase = true) == true) {
-            DebugLog.d(TAG, "Device matched by name: $deviceName")
-            return true
-        }
-        
-        // Match by advertised service UUID
-        val advertisedServices = scanRecord?.serviceUuids
-        if (advertisedServices != null) {
-            for (uuid in advertisedServices) {
-                if (uuid.uuid == EasyTouchConstants.SERVICE_UUID) {
-                    DebugLog.d(TAG, "Device matched by service UUID: ${uuid.uuid}")
-                    return true
-                }
-            }
         }
         
         return false

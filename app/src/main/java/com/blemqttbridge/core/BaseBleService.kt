@@ -18,9 +18,11 @@ import com.blemqttbridge.core.interfaces.BlePluginInterface
 import com.blemqttbridge.core.interfaces.MqttPublisher
 import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
+import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import java.util.UUID
 
 /**
@@ -38,9 +40,14 @@ class BaseBleService : Service() {
         const val ACTION_STOP_SCAN = "com.blemqttbridge.STOP_SCAN"
         const val ACTION_STOP_SERVICE = "com.blemqttbridge.STOP_SERVICE"
         const val ACTION_DISCONNECT = "com.blemqttbridge.DISCONNECT"
+        const val ACTION_ADD_PLUGIN = "com.blemqttbridge.ADD_PLUGIN"
+        const val ACTION_REMOVE_PLUGIN = "com.blemqttbridge.REMOVE_PLUGIN"
+        const val ACTION_CLEAR_PLUGIN_DISCOVERY = "com.blemqttbridge.CLEAR_PLUGIN_DISCOVERY"
         const val ACTION_EXPORT_DEBUG_LOG = "com.blemqttbridge.EXPORT_DEBUG_LOG"
         const val ACTION_START_TRACE = "com.blemqttbridge.START_TRACE"
         const val ACTION_STOP_TRACE = "com.blemqttbridge.STOP_TRACE"
+        
+        const val EXTRA_PLUGIN_ID = "plugin_id"
         
         const val EXTRA_BLE_PLUGIN_ID = "ble_plugin_id"
         const val EXTRA_OUTPUT_PLUGIN_ID = "output_plugin_id"
@@ -262,6 +269,38 @@ class BaseBleService : Service() {
             
             ACTION_DISCONNECT -> {
                 disconnectAll()
+            }
+            
+            ACTION_REMOVE_PLUGIN -> {
+                val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
+                if (pluginId != null) {
+                    Log.i(TAG, "Removing plugin: $pluginId")
+                    disablePluginKeepConnection(pluginId)
+                } else {
+                    Log.w(TAG, "REMOVE_PLUGIN action missing plugin_id extra")
+                }
+            }
+            
+            ACTION_ADD_PLUGIN -> {
+                val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
+                if (pluginId != null) {
+                    Log.i(TAG, "Re-enabling plugin: $pluginId")
+                    enablePluginResumeConnection(pluginId)
+                } else {
+                    Log.w(TAG, "ADD_PLUGIN action missing plugin_id extra")
+                }
+            }
+            
+            ACTION_CLEAR_PLUGIN_DISCOVERY -> {
+                val pluginId = intent.getStringExtra(EXTRA_PLUGIN_ID)
+                if (pluginId != null) {
+                    Log.i(TAG, "Clearing discovery for plugin: $pluginId")
+                    serviceScope.launch {
+                        clearPluginDiscovery(pluginId)
+                    }
+                } else {
+                    Log.w(TAG, "CLEAR_PLUGIN_DISCOVERY action missing plugin_id extra")
+                }
             }
             
             ACTION_EXPORT_DEBUG_LOG -> {
@@ -492,6 +531,104 @@ class BaseBleService : Service() {
         // Try to reconnect to bonded devices or scan for new ones
         reconnectToBondedDevices()
     }
+    
+    /**
+     * Load a single plugin dynamically without restarting the service.
+     * Used when user adds a plugin from the UI.
+     */
+    private suspend fun loadPluginDynamically(pluginId: String) {
+        // Map UI plugin IDs to internal plugin IDs
+        val internalPluginId = when (pluginId) {
+            "onecontrol" -> "onecontrol_v2"
+            else -> pluginId
+        }
+        
+        Log.i(TAG, "Loading plugin dynamically: $pluginId (internal: $internalPluginId)")
+        
+        // CRITICAL: Unload any existing instance first to prevent duplicate heartbeats/resources
+        pluginRegistry.unloadDevicePlugin(internalPluginId)
+        
+        // Give BLE stack time to fully release any previous connections
+        // Without this, writeCharacteristicNoResponse may fail with result=false
+        delay(500)
+        
+        val bleConfig = AppConfig.getBlePluginConfig(applicationContext, internalPluginId)
+        Log.i(TAG, "Plugin config: $bleConfig")
+        
+        // Try legacy interface first
+        val legacyPlugin = pluginRegistry.getBlePlugin(internalPluginId, applicationContext, bleConfig)
+        if (legacyPlugin != null) {
+            blePlugin = legacyPlugin
+            Log.i(TAG, "✓ Dynamically loaded legacy plugin: $internalPluginId")
+            // Schedule reconnection after delay to let BLE stack fully reset
+            serviceScope.launch {
+                delay(2000) // Give BLE stack time to fully release previous connection
+                Log.i(TAG, "🔄 Attempting reconnection for newly added plugin: $internalPluginId")
+                connectToPluginDevices(internalPluginId)
+            }
+            return
+        }
+        
+        // Try new BleDevicePlugin architecture
+        val devicePlugin = pluginRegistry.getDevicePlugin(internalPluginId, applicationContext)
+        if (devicePlugin != null) {
+            val config = PluginConfig(parameters = bleConfig)
+            devicePlugin.initialize(applicationContext, config)
+            Log.i(TAG, "✓ Dynamically loaded device plugin: $internalPluginId (target MACs: ${devicePlugin.getConfiguredDevices()})")
+            // Schedule reconnection after delay to let BLE stack fully reset
+            serviceScope.launch {
+                delay(2000) // Give BLE stack time to fully release previous connection
+                Log.i(TAG, "🔄 Attempting reconnection for newly added plugin: $internalPluginId")
+                connectToPluginDevices(internalPluginId)
+            }
+        } else {
+            Log.w(TAG, "✗ Failed to load plugin dynamically: $internalPluginId (not found in registry)")
+        }
+    }
+    
+    /**
+     * Connect to devices for a specific plugin.
+     * Used when dynamically adding a plugin.
+     */
+    private suspend fun connectToPluginDevices(pluginId: String) {
+        val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
+        if (devicePlugin == null) {
+            Log.w(TAG, "No device plugin found for: $pluginId")
+            return
+        }
+        
+        // Check if any bonded device matches this plugin
+        try {
+            val bondedDevices = bluetoothAdapter.bondedDevices
+            for (device in bondedDevices) {
+                if (devicePlugin.matchesDevice(device, null)) {
+                    Log.i(TAG, "🔗 Found bonded device for newly added plugin: ${device.address} -> $pluginId")
+                    // Check if already connected
+                    if (!connectedDevices.containsKey(device.address)) {
+                        connectToDevice(device, pluginId)
+                    } else {
+                        Log.d(TAG, "Device ${device.address} already connected")
+                    }
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied for accessing bonded devices", e)
+        }
+        
+        // Also check configured MAC addresses
+        val configuredMacs = devicePlugin.getConfiguredDevices()
+        for (mac in configuredMacs) {
+            if (!connectedDevices.containsKey(mac)) {
+                try {
+                    val device = bluetoothAdapter.getRemoteDevice(mac)
+                    Log.i(TAG, "🔗 Connecting to configured device for newly added plugin: $mac -> $pluginId")
+                    connectToDevice(device, pluginId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to get remote device $mac", e)
+                }
+            }
+        }
+    }
 
     /**
      * Connect to known devices - both bonded and configured.
@@ -521,8 +658,15 @@ class BaseBleService : Service() {
             Log.e(TAG, "Permission denied for accessing bonded devices", e)
         }
         
-        // 2. Check configured device MACs from device plugins
+        // 2. Check configured device MACs from ENABLED device plugins only
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
         for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
+            // Skip disabled plugins
+            if (!enabledPlugins.contains(pluginId)) {
+                Log.d(TAG, "Skipping disabled plugin for device lookup: $pluginId")
+                continue
+            }
+            
             val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
             if (devicePlugin != null) {
                 try {
@@ -578,9 +722,13 @@ class BaseBleService : Service() {
         // Using filters allows scanning to continue with screen locked
         val scanFilters = mutableListOf<ScanFilter>()
         val addedMacs = mutableSetOf<String>() // Track MACs to avoid duplicates
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(applicationContext)
         
         // Get target MAC addresses from loaded BlePluginInterface plugins (legacy)
         for ((pluginId, plugin) in pluginRegistry.getLoadedBlePlugins()) {
+            // Skip disabled plugins
+            if (!enabledPlugins.contains(pluginId)) continue
+            
             val targetMacs = plugin.getTargetDeviceAddresses()
             for (mac in targetMacs) {
                 if (addedMacs.add(mac.uppercase())) {
@@ -596,7 +744,14 @@ class BaseBleService : Service() {
         
         // Get target MAC addresses from BleDevicePlugin plugins (new architecture)
         // This includes plugins like EasyTouch that use the new callback architecture
+        // Only check ENABLED plugins
         for (pluginId in pluginRegistry.getRegisteredBlePlugins()) {
+            // Skip disabled plugins
+            if (!enabledPlugins.contains(pluginId)) {
+                Log.d(TAG, "Skipping disabled plugin for scan filters: $pluginId")
+                continue
+            }
+            
             val devicePlugin = pluginRegistry.getDevicePlugin(pluginId, applicationContext)
             if (devicePlugin != null) {
                 // Initialize with config so it knows the configured MAC
@@ -1339,6 +1494,117 @@ class BaseBleService : Service() {
             job.cancel()
         }
         pollingJobs.clear()
+    }
+    
+    /**
+     * Disable a plugin without disconnecting BLE.
+     * Publishes offline messages but keeps GATT connection and heartbeat running.
+     * Used when a plugin is removed by the user.
+     */
+    private fun disablePluginKeepConnection(pluginId: String) {
+        // Map UI plugin IDs to internal plugin IDs
+        val internalPluginId = when (pluginId) {
+            "onecontrol" -> "onecontrol_v2"
+            else -> pluginId
+        }
+        
+        Log.i(TAG, "Disabling plugin (keeping BLE connection): $pluginId (internal: $internalPluginId)")
+        
+        // Find all devices belonging to this plugin
+        val pluginDevices = connectedDevices.filter { (_, deviceInfo) ->
+            deviceInfo.second == internalPluginId
+        }
+        
+        Log.i(TAG, "Found ${pluginDevices.size} device(s) for plugin $pluginId - keeping connections open")
+        
+        for ((address, _) in pluginDevices) {
+            // Publish MQTT offline/unavailable message
+            val availabilityTopic = "$internalPluginId/$address/availability"
+            Log.i(TAG, "Publishing offline to $availabilityTopic")
+            mqttPublisher.publishAvailability(availabilityTopic, false)
+            
+            // DON'T cancel heartbeat jobs - let the connection stay fully active
+            // This way re-enabling is instant
+        }
+        
+        // Update plugin status to show disabled in UI
+        val currentStatuses = _pluginStatuses.value.toMutableMap()
+        currentStatuses.remove(internalPluginId)
+        _pluginStatuses.value = currentStatuses
+        
+        Log.i(TAG, "Plugin $pluginId disabled. BLE connections and heartbeats still running.")
+    }
+    
+    /**
+     * Clear all Home Assistant discovery configs for a plugin.
+     * This removes the entities from HA when a plugin is removed.
+     */
+    private suspend fun clearPluginDiscovery(pluginId: String) {
+        val mqtt = outputPlugin as? MqttOutputPlugin
+        if (mqtt == null) {
+            Log.w(TAG, "Cannot clear discovery - MQTT plugin not available")
+            return
+        }
+        
+        // Get device MAC for this plugin from settings
+        val settings = AppSettings(this)
+        val deviceMac = when (pluginId) {
+            "onecontrol" -> settings.oneControlGatewayMac.first()
+            "easytouch" -> settings.easyTouchThermostatMac.first()
+            "gopower" -> settings.goPowerControllerMac.first()
+            else -> null
+        }
+        
+        if (deviceMac.isNullOrBlank()) {
+            Log.w(TAG, "Cannot clear discovery - no MAC address for $pluginId")
+            return
+        }
+        
+        Log.i(TAG, "🧹 Clearing HA discovery for $pluginId ($deviceMac)")
+        
+        // Clear discovery using the tracked topics
+        val macPattern = deviceMac.replace(":", "").lowercase()
+        val cleared = mqtt.clearPluginDiscovery(macPattern)
+        
+        Log.i(TAG, "🧹 Cleared $cleared discovery topics for $pluginId")
+    }
+    
+    /**
+     * Re-enable a plugin that was disabled (but kept its BLE connection).
+     * Publishes online messages - heartbeat was never stopped.
+     */
+    private fun enablePluginResumeConnection(pluginId: String) {
+        // Map UI plugin IDs to internal plugin IDs
+        val internalPluginId = when (pluginId) {
+            "onecontrol" -> "onecontrol_v2"
+            else -> pluginId
+        }
+        
+        Log.i(TAG, "Re-enabling plugin: $pluginId (internal: $internalPluginId)")
+        
+        // Find existing devices for this plugin
+        val pluginDevices = connectedDevices.filter { (_, deviceInfo) ->
+            deviceInfo.second == internalPluginId
+        }
+        
+        if (pluginDevices.isNotEmpty()) {
+            Log.i(TAG, "Found ${pluginDevices.size} existing connection(s) for plugin $pluginId - resuming")
+            
+            for ((address, _) in pluginDevices) {
+                // Publish MQTT online/available message
+                val availabilityTopic = "$internalPluginId/$address/availability"
+                Log.i(TAG, "Publishing online to $availabilityTopic")
+                mqttPublisher.publishAvailability(availabilityTopic, true)
+            }
+            
+            Log.i(TAG, "Plugin $pluginId re-enabled. Connection was never interrupted.")
+        } else {
+            Log.i(TAG, "No existing connections for plugin $pluginId - will connect fresh")
+            // No existing connection, need to connect from scratch
+            serviceScope.launch {
+                loadPluginDynamically(pluginId)
+            }
+        }
     }
     
     /**

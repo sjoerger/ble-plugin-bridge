@@ -156,6 +156,8 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
     }
     
     override suspend fun publishDiscovery(topic: String, payload: String) {
+        // Track discovery topics for cleanup when plugin is removed
+        publishedDiscoveryTopics.add(topic)
         publish(topic, payload, retained = true)
     }
     
@@ -215,6 +217,65 @@ class MqttOutputPlugin(private val context: Context) : OutputPluginInterface {
         Log.d(TAG, "📡 Published availability to $fullTopic: $payload")
     }
     
+    // Track published discovery topics so we can clear them when removing a plugin
+    private val publishedDiscoveryTopics = mutableSetOf<String>()
+    
+    /**
+     * Publish discovery and track the topic for later cleanup.
+     */
+    fun publishDiscoveryTracked(topic: String, payload: String) {
+        publishedDiscoveryTopics.add(topic)
+        try {
+            val message = MqttMessage(payload.toByteArray()).apply {
+                qos = QOS
+                isRetained = true
+            }
+            mqttClient?.publish(topic, message)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to publish discovery to $topic", e)
+        }
+    }
+    
+    /**
+     * Clear all Home Assistant discovery configs for a specific plugin.
+     * Publishing empty payload to config topics removes entities from HA.
+     * 
+     * @param pluginPattern Pattern to match (e.g., "onecontrol_ble_" to clear all OneControl entities)
+     */
+    suspend fun clearPluginDiscovery(pluginPattern: String): Int {
+        val client = mqttClient
+        if (client == null || !client.isConnected) {
+            Log.w(TAG, "Cannot clear discovery - MQTT not connected")
+            return 0
+        }
+        
+        Log.i(TAG, "🧹 Clearing HA discovery for pattern: $pluginPattern")
+        
+        // Find all tracked topics matching the pattern
+        val topicsToDelete = publishedDiscoveryTopics.filter { it.contains(pluginPattern) }
+        
+        Log.i(TAG, "🧹 Found ${topicsToDelete.size} discovery topics to clear")
+        
+        var cleared = 0
+        for (topic in topicsToDelete) {
+            try {
+                val emptyMessage = MqttMessage(ByteArray(0)).apply {
+                    qos = QOS
+                    isRetained = true
+                }
+                client.publish(topic, emptyMessage)
+                publishedDiscoveryTopics.remove(topic)
+                cleared++
+                Log.d(TAG, "🧹 Cleared: $topic")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to clear $topic: ${e.message}")
+            }
+        }
+        
+        Log.i(TAG, "🧹 Cleared $cleared discovery topics")
+        return cleared
+    }
+
     /**
      * Called when MQTT connection is established.
      * Publishes "online" to availability topic and discovery payload.
