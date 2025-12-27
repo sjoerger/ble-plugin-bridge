@@ -255,4 +255,6 @@ mosquitto_sub -h <broker> -u mqtt -P mqtt -t "homeassistant/#" -v
 
 ## License
 
-This project is provided as-is for personal use. The OneControl protocol implementation is based on observation and reverse engineering of BLE communications.
+MIT License - see [LICENSE](LICENSE) for details.
+
+EasyTouch thermostat protocol implementation was informed by the [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) project by k3vmcd.

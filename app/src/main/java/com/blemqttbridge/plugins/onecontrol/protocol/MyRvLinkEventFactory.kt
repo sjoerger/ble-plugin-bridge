@@ -4,7 +4,6 @@ import android.util.Log
 
 /**
  * MyRvLink Event Factory - Decodes MyRvLink events from raw data
- * Based on MyRvLinkEventFactory.TryDecodeEvent() from decompiled code
  */
 object MyRvLinkEventFactory {
     private const val TAG = "MyRvLinkEventFactory"

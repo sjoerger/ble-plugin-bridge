@@ -1,8 +1,7 @@
 package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
- * Event type constants for MyRvLink events (copied from legacy app)
- * Based on MyRvLinkEventType enum from decompiled code
+ * Event type constants for MyRvLink events
  */
 object MyRvLinkEventType {
     const val Unknown: Byte = 0x00

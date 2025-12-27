@@ -4,7 +4,7 @@ import java.util.UUID
 
 /**
  * Constants for EasyTouch thermostat BLE protocol.
- * Based on analysis of HACS integration: k3vmcd/ha-micro-air-easytouch
+ * Reference: k3vmcd/ha-micro-air-easytouch HACS integration
  */
 object EasyTouchConstants {
     
@@ -130,7 +130,7 @@ object EasyTouchConstants {
     val SUPPORTED_FAN_MODES = listOf("auto", "low", "high")
     
     // ===== Z_sts ARRAY INDICES =====
-    // From decompiled U_Thermostat.java - these are the correct indices
+    // Status array indices for thermostat state data
     
     object StatusIndex {
         const val AUTO_HEAT_SETPOINT = 0   // autoHeatSP
@@ -162,7 +162,7 @@ object EasyTouchConstants {
     /** Delay before requesting initial status */
     const val INITIAL_STATUS_DELAY_MS = 500L
     
-    /** Delay before reading response after writing command (official app uses immediate read) */
+    /** Delay before reading response after writing command */
     const val READ_DELAY_MS = 50L
     const val STATUS_POLL_INTERVAL_MS = 60000L  // 60 seconds
     

@@ -44,7 +44,7 @@ class AppSettings(private val context: Context) {
         val BLE_SCANNER_ENABLED = booleanPreferencesKey("ble_scanner_enabled")
         
         // Default values
-        const val DEFAULT_MQTT_HOST = "10.115.19.131"
+        const val DEFAULT_MQTT_HOST = ""
         const val DEFAULT_MQTT_PORT = 1883
         const val DEFAULT_MQTT_USERNAME = "mqtt"
         const val DEFAULT_MQTT_PASSWORD = "mqtt"

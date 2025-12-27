@@ -183,7 +183,7 @@ class GoPowerGattCallback(
     private var currentState: GoPowerState? = null
     
     // Device info extracted from status responses
-    private var deviceModel: String = "GP-PWM-30-SB"  // Hardcoded per decompiled app
+    private var deviceModel: String = "GP-PWM-30-SB"  // Default model
     private var deviceSerial: String = "Unknown"
     private var deviceFirmware: String = "Unknown"
     

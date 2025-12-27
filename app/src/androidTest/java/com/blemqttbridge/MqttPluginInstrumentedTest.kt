@@ -24,7 +24,8 @@ class MqttPluginInstrumentedTest {
     
     companion object {
         // ⚙️ MQTT Broker Configuration ⚙️
-        private const val BROKER_URL = "tcp://10.115.19.131:1883"
+        // Set your broker details before running tests
+        private const val BROKER_URL = "tcp://YOUR_BROKER_IP:1883"
         private const val USERNAME = "mqtt"
         private const val PASSWORD = "mqtt"
         private const val TOPIC_PREFIX = "test/ble_bridge"

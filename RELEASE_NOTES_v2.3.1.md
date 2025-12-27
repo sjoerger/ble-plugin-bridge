@@ -214,7 +214,7 @@ The deprecated `updateBleStatus()` and `updateDiagnosticStatus()` methods in `Mq
 
 ## 🙏 Acknowledgments
 
-- GoPower protocol reverse-engineered through BLE packet analysis
+- GoPower protocol documented through BLE packet analysis
 - Per-plugin status architecture inspired by need to monitor multiple RV systems simultaneously
 - System diagnostic sensors modeled after common Android system monitoring tools
 

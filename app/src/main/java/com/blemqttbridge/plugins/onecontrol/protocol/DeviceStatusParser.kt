@@ -4,7 +4,6 @@ import android.util.Log
 
 /**
  * Parses device status events from MyRvLink protocol
- * Based on decompiled MyRvLink event classes
  */
 object DeviceStatusParser {
     private const val TAG = "DeviceStatusParser"

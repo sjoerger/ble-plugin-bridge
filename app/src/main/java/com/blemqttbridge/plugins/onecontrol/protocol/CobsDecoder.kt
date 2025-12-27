@@ -110,7 +110,8 @@ object CobsDecoder {
     /**
      * Encode data using COBS with CRC8
      * 
-     * Rewritten to exactly match decompiled CobsEncoder.cs from OneControl app
+     * COBS encoder implementation.
+     * Encodes data with optional start frame and CRC8 checksum.
      */
     fun encode(data: ByteArray, prependStartFrame: Boolean = true, useCrc: Boolean = true): ByteArray {
         val output = ByteArray(382)  // Max output buffer size

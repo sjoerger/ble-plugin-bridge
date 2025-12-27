@@ -1,8 +1,8 @@
 package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
- * CRC8 stateful calculator matching decompiled C# Crc8 struct
- * Uses lookup table with initial value 85
+ * CRC8 stateful calculator.
+ * Uses lookup table with initial value 85 (0x55)
  */
 class Crc8 {
     private var _value: Int = RESET_VALUE
@@ -21,7 +21,7 @@ class Crc8 {
     companion object {
         private const val RESET_VALUE: Int = 85  // 0x55
         
-        // CRC8 lookup table from decompiled C# code
+        // CRC8 lookup table (polynomial 0x07)
         private val TABLE: ByteArray = byteArrayOf(
             0, 94, (-68).toByte(), (-30).toByte(), 97, 63, (-35).toByte(), (-125).toByte(), (-62).toByte(), (-100).toByte(),
             126, 32, (-93).toByte(), (-3).toByte(), 31, 65, (-99).toByte(), (-61).toByte(), 33, 127,

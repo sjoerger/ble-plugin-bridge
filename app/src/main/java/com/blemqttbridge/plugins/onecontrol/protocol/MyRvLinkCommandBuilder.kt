@@ -2,7 +2,6 @@ package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * Builds MyRvLink commands for device control
- * Based on decompiled MyRvLinkCommand classes
  */
 object MyRvLinkCommandBuilder {
     

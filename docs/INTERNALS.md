@@ -325,7 +325,7 @@ class PluginRegistry {
 
 ### Overview
 
-The OneControl BLE Gateway uses a proprietary protocol for RV device control. Understanding this is critical for adding new entity support.
+The OneControl BLE Gateway uses a custom protocol for RV device control. Understanding this is critical for adding new entity support.
 
 ### File Structure
 
@@ -683,7 +683,7 @@ fun handleCommand(commandTopic: String, payload: String): Result<Unit> {
 
 The EasyTouch (Micro-Air) thermostat uses a simpler JSON-over-BLE protocol compared to OneControl. The plugin communicates via a single BLE characteristic using plaintext JSON commands and responses.
 
-**Reference:** Official Android app `U_Thermostat.java` (decompiled)
+**Reference:** [ha-micro-air-easytouch](https://github.com/k3vmcd/ha-micro-air-easytouch) HACS integration
 
 ### File Structure
 
@@ -962,7 +962,7 @@ private fun parseZoneStsData(zoneSts: List<Int>, zoneIndex: Int) {
 The PRM array contains system-level flags:
 
 ```kotlin
-// PRM[1] bit flags (from decompiled bytecode analysis)
+// PRM[1] bit flags
 // Bit 0: wifiConnected
 // Bit 1: awsConnected  
 // Bit 2: pushNotify
@@ -1927,7 +1927,7 @@ fun buildActionCover(
     return byteArrayOf(
         (clientCommandId.toInt() and 0xFF).toByte(),
         ((clientCommandId.toInt() shr 8) and 0xFF).toByte(),
-        0x4?.toByte(),  // CommandType: ActionCover (determine from decompiled code)
+        0x4?.toByte(),  // CommandType: ActionCover (needs verification)
         deviceTableId,
         deviceId,
         actionByte

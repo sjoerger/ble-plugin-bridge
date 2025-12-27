@@ -4,7 +4,6 @@ import android.util.Log
 
 /**
  * CAN Message Parser - Converts V2MessageType messages to CAN message format
- * Based on BleCommunicationsAdapter.OnDataReceived() from decompiled code
  */
 object CanMessageParser {
     private const val TAG = "CanMessageParser"

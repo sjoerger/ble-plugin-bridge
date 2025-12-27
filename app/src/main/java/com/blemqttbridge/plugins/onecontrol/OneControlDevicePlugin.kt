@@ -531,9 +531,8 @@ class OneControlGattCallback(
     }
     
     /**
-     * Calculate authentication KEY from challenge using BleDeviceUnlockManager.Encrypt() algorithm
-     * From decompiled code: MyRvLinkBleGatewayScanResult.RvLinkKeySeedCypher = 612643285
-     * COPIED DIRECTLY FROM LEGACY APP
+     * Calculate authentication KEY from challenge using BLE unlock algorithm
+     * Key seed cypher constant: 612643285 (0x2483FFD5)
      * Byte order: BIG-ENDIAN for both challenge and KEY
      */
     private fun calculateAuthKey(seed: Long): ByteArray {
@@ -1230,7 +1229,7 @@ class OneControlGattCallback(
     
     /**
      * Handle RelayBasicLatchingStatus event (lights, switches)
-     * Per decompiled LogicalDeviceRelayStatusType2: raw output state in LOW NIBBLE
+     * Raw output state in LOW NIBBLE of status byte
      * Status byte format: upper nibble = flags, lower nibble = state (0x00=OFF, 0x01=ON)
      * Extended format (9 bytes): includes DTC code for fault diagnostics
      */

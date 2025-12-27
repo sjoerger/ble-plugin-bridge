@@ -239,7 +239,7 @@ class EasyTouchGattCallback(
     
     companion object {
         private const val TAG = "EasyTouchGattCallback"
-        private const val STATUS_POLL_INTERVAL_MS = 4000L // 4 seconds, same as official app
+        private const val STATUS_POLL_INTERVAL_MS = 4000L // 4 seconds polling interval
     }
     
     // Base topic
@@ -1487,7 +1487,6 @@ data class ZoneConfiguration(
 
 /**
  * Data class to hold state for a single zone.
- * Field names match decompiled U_Thermostat.java
  */
 data class ZoneState(
     val zoneNumber: Int,

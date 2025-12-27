@@ -4,7 +4,6 @@ import android.util.Log
 
 /**
  * MyRvLink Event Decoders
- * Based on decompiled C# event classes from OneControl.Direct.MyRvLink
  * 
  * Each decoder parses raw bytes from a specific event type into structured data
  */
@@ -134,7 +133,7 @@ data class DimmableLightStatusEvent(
             // Convert brightness to percentage (0-100)
             val brightness = (brightnessRaw * 100) / 255
             
-            // Light is ON if mode > 0 (per decompiled code: On = Data[0] > 0)
+            // Light is ON if mode > 0
             val isOn = mode > 0
             
             return DimmableLightStatusEvent(deviceAddress, brightness, isOn, mode)

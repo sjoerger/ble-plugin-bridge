@@ -46,7 +46,7 @@ object GoPowerConstants {
     /** Expected number of fields in response */
     const val EXPECTED_FIELD_COUNT = 32
     
-    /** Polling interval in milliseconds (same as official app) */
+    /** Polling interval in milliseconds */
     const val STATUS_POLL_INTERVAL_MS = 4000L
     
     // ===== TIMING CONSTANTS =====
@@ -61,7 +61,7 @@ object GoPowerConstants {
     const val READ_DELAY_MS = 150L
     
     // ===== RESPONSE FIELD INDICES =====
-    // Based on analysis of PwmResponseParser.java and HCI trace
+    // Response field indices (0-indexed from comma-separated values)
     
     /** Field 0: Solar/PV Panel Current (mA, divide by 1000 for A) */
     const val FIELD_SOLAR_CURRENT = 0

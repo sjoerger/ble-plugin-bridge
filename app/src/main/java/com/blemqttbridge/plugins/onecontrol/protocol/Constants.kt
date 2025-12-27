@@ -2,7 +2,6 @@ package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * Constants for OneControl BLE Gateway integration
- * Based on analysis of C# decompiled code and Python integration
  */
 object Constants {
     // BLE Service UUIDs

@@ -4,7 +4,6 @@ import android.util.Log
 
 /**
  * COBS byte-by-byte decoder (stateful)
- * Based on CobsDecoder.DecodeByte() from decompiled code
  * This maintains state between calls, accumulating bytes until a complete frame is received
  */
 class CobsByteDecoder(private val useCrc: Boolean = true) {
@@ -14,7 +13,7 @@ class CobsByteDecoder(private val useCrc: Boolean = true) {
     private val FRAME_BYTE_COUNT_LSB = 64  // 2^6
     
     private var codeByte = 0
-    private val outputBuffer = ByteArray(382)  // Max buffer size from decompiled code
+    private val outputBuffer = ByteArray(382)  // Max buffer size for COBS frames
     private var destinationNextByteIndex = 0
     private val minPayloadSize = if (useCrc) 1 else 0
     

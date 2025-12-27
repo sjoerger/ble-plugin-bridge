@@ -2,7 +2,6 @@ package com.blemqttbridge.plugins.onecontrol.protocol
 
 /**
  * V2MessageType - Message types used by the gateway for CAN-over-BLE communication
- * Based on BleCommunicationsAdapter.cs from decompiled code
  */
 enum class V2MessageType(val value: Byte) {
     Packed(1),
