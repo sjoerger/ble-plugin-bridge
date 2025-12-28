@@ -232,14 +232,31 @@ Enable via the **BLE Scanner** toggle. Results are published as sensor attribute
    - Uses BLE scan filters for screen-off operation
    - Maintains connections during deep sleep
 
+5. **Doze Mode Keepalive (v2.3.6+)**
+   - **Prevents BLE connections from dropping during deep sleep**
+   - Sends periodic keepalive pings every 30 minutes
+   - Uses `AlarmManager.setExactAndAllowWhileIdle()` to wake device during Doze
+   - **Enabled by default** - ideal for mains-powered devices
+   - **Toggle in Settings:** System Settings (⚙️) → Doze Mode Prevention → Keepalive Pings
+   
+   **When to enable:**
+   - ✅ Device is plugged in/mains-powered (recommended)
+   - ✅ You need 24/7 BLE connectivity without manual intervention
+   - ✅ RV/boat/camper installations with shore power
+   
+   **When to disable:**
+   - ❌ Battery-powered devices where power savings are critical
+   - ❌ You only use the app occasionally (connections auto-reconnect on device wake)
+
 #### Recommended Settings
 
 For maximum reliability on aggressive battery management devices (Samsung, Xiaomi, OnePlus, etc.):
 
 1. **Battery Optimization:** Set to "Active - Service protected"
-2. **Auto-start:** Enable in device settings if available
-3. **Background restrictions:** Disable for this app
-4. **Data saver:** Add app to exception list
+2. **Keepalive Pings:** Enable for mains-powered setups (Settings → Doze Mode Prevention)
+3. **Auto-start:** Enable in device settings if available
+4. **Background restrictions:** Disable for this app
+5. **Data saver:** Add app to exception list
 
 See [docs/SERVICE_HARDENING.md](docs/SERVICE_HARDENING.md) for detailed hardening strategy.
 

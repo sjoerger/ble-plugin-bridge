@@ -240,6 +240,65 @@ fun SystemSettingsScreen(
                 )
             }
             
+            // Doze Mode Keepalive Setting
+            Text(
+                text = "Doze Mode Prevention",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 6.dp, end = 6.dp, bottom = 8.dp, top = 8.dp)
+            )
+            
+            val prefs = context.getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
+            var keepAliveEnabled by remember {
+                mutableStateOf(prefs.getBoolean("keepalive_enabled", true))
+            }
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Keepalive Pings",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (keepAliveEnabled)
+                            "Active - Prevents disconnection during idle (30min interval)"
+                        else
+                            "Inactive - Connections may drop overnight",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (keepAliveEnabled)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                
+                Switch(
+                    checked = keepAliveEnabled,
+                    onCheckedChange = { enabled ->
+                        keepAliveEnabled = enabled
+                        prefs.edit().putBoolean("keepalive_enabled", enabled).apply()
+                        
+                        // Notify service to update keepalive schedule
+                        val intent = android.content.Intent(context, com.blemqttbridge.core.BaseBleService::class.java)
+                        intent.action = if (enabled) {
+                            com.blemqttbridge.core.BaseBleService.ACTION_KEEPALIVE_PING
+                        } else {
+                            // Send a dummy action to trigger service update
+                            com.blemqttbridge.core.BaseBleService.ACTION_KEEPALIVE_PING
+                        }
+                        try {
+                            context.startService(intent)
+                        } catch (_: Exception) {}
+                    }
+                )
+            }
+            
             Spacer(modifier = Modifier.height(16.dp))
             
             // Diagnostics Section

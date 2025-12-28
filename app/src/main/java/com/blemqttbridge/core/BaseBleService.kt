@@ -46,6 +46,10 @@ class BaseBleService : Service() {
         const val ACTION_EXPORT_DEBUG_LOG = "com.blemqttbridge.EXPORT_DEBUG_LOG"
         const val ACTION_START_TRACE = "com.blemqttbridge.START_TRACE"
         const val ACTION_STOP_TRACE = "com.blemqttbridge.STOP_TRACE"
+        const val ACTION_KEEPALIVE_PING = "com.blemqttbridge.KEEPALIVE_PING"
+        
+        // Keepalive interval for Doze mode prevention (30 minutes)
+        private const val KEEPALIVE_INTERVAL_MS = 30 * 60 * 1000L // 30 minutes
         
         const val EXTRA_PLUGIN_ID = "plugin_id"
         
@@ -91,6 +95,8 @@ class BaseBleService : Service() {
     private lateinit var bluetoothLeScanner: BluetoothLeScanner
     private lateinit var pluginRegistry: PluginRegistry
     private lateinit var memoryManager: MemoryManager
+    private var alarmManager: AlarmManager? = null
+    private var keepAlivePendingIntent: PendingIntent? = null
     
     private var blePlugin: BlePluginInterface? = null
     private var outputPlugin: OutputPluginInterface? = null
@@ -243,6 +249,9 @@ class BaseBleService : Service() {
         bluetoothEnabled = bluetoothAdapter.isEnabled
         Log.d(TAG, "Bluetooth state receiver registered (BT currently ${if (bluetoothEnabled) "ON" else "OFF"})")
         
+        // Initialize AlarmManager for keepalive
+        alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))
     }
@@ -270,6 +279,11 @@ class BaseBleService : Service() {
                     initializeMultiplePlugins(enabledBlePlugins, outputPluginId, outputConfig)
                     // Note: initializeMultiplePlugins now calls reconnectToBondedDevices() which 
                     // either connects to bonded devices or falls back to scanning
+                    
+                    // Schedule keepalive if enabled
+                    if (isKeepAliveEnabled()) {
+                        scheduleKeepAlive()
+                    }
                 }
             }
             
@@ -347,6 +361,13 @@ class BaseBleService : Service() {
                     android.widget.Toast.makeText(this, "Trace stopped (no file created)", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
+            
+            ACTION_KEEPALIVE_PING -> {
+                Log.d(TAG, "⏰ Keepalive ping received")
+                serviceScope.launch {
+                    performKeepAlivePing()
+                }
+            }
         }
         
         return START_STICKY
@@ -384,6 +405,9 @@ class BaseBleService : Service() {
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "Bluetooth state receiver not registered")
         }
+        
+        // Cancel keepalive alarm
+        cancelKeepAlive()
         
         // Cleanup remote control manager
         remoteControlManager?.cleanup()
@@ -2154,4 +2178,116 @@ class BaseBleService : Service() {
             android.widget.Toast.makeText(this, "Failed to share file: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
         }
     }
+    
+    // ============================================================================
+    // Keepalive Management (Doze Mode Prevention)
+    // ============================================================================
+    
+    /**
+     * Check if keepalive feature is enabled in preferences.
+     */
+    private fun isKeepAliveEnabled(): Boolean {
+        val prefs = getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        return prefs.getBoolean("keepalive_enabled", true) // Default ON
+    }
+    
+    /**
+     * Schedule periodic keepalive alarm using AlarmManager.
+     * Uses setExactAndAllowWhileIdle() to wake device during Doze mode.
+     */
+    private fun scheduleKeepAlive() {
+        val intent = Intent(this, com.blemqttbridge.receivers.KeepAliveReceiver::class.java).apply {
+            action = com.blemqttbridge.receivers.KeepAliveReceiver.ACTION_KEEPALIVE
+        }
+        
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            intent,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+        )
+        
+        keepAlivePendingIntent = pendingIntent
+        
+        val triggerAtMillis = System.currentTimeMillis() + KEEPALIVE_INTERVAL_MS
+        
+        alarmManager?.setExactAndAllowWhileIdle(
+            AlarmManager.RTC_WAKEUP,
+            triggerAtMillis,
+            pendingIntent
+        )
+        
+        Log.i(TAG, "⏰ Keepalive scheduled: next ping in ${KEEPALIVE_INTERVAL_MS / 60000} minutes")
+    }
+    
+    /**
+     * Cancel the keepalive alarm.
+     */
+    private fun cancelKeepAlive() {
+        val pendingIntent = keepAlivePendingIntent
+        if (pendingIntent != null) {
+            alarmManager?.cancel(pendingIntent)
+            pendingIntent.cancel()
+            Log.i(TAG, "⏰ Keepalive cancelled")
+        }
+        keepAlivePendingIntent = null
+    }
+    
+    /**
+     * Perform a lightweight keepalive operation on all connected devices.
+     * This is called periodically to prevent BLE connections from going stale during Doze.
+     */
+    private suspend fun performKeepAlivePing() {
+        withContext(Dispatchers.IO) {
+            try {
+                Log.d(TAG, "⏰ Performing keepalive ping on ${connectedDevices.size} devices")
+                
+                var pingsSuccessful = 0
+                var pingsFailed = 0
+                
+                connectedDevices.forEach { (address, deviceInfo) ->
+                    try {
+                        val gatt = deviceInfo.first
+                        // Attempt to read RSSI as a lightweight keepalive operation
+                        // The actual result comes via onReadRemoteRssi callback, but the
+                        // initiation itself is enough to keep the connection alive
+                        val initiated = gatt.readRemoteRssi()
+                        when {
+                            initiated -> {
+                                pingsSuccessful++
+                                Log.d(TAG, "⏰ Keepalive ping OK: $address")
+                            }
+                            else -> {
+                                pingsFailed++
+                                Log.d(TAG, "⏰ Keepalive ping failed: $address")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        pingsFailed++
+                        Log.w(TAG, "⚠️ Keepalive ping exception: $address - ${e.message}")
+                    }
+                    
+                    // Small delay between pings to avoid overwhelming BLE stack
+                    delay(100)
+                }
+                
+                Log.i(TAG, "⏰ Keepalive complete: $pingsSuccessful OK, $pingsFailed failed")
+                
+                // Reschedule next keepalive if still enabled
+                when (isKeepAliveEnabled()) {
+                    true -> scheduleKeepAlive()
+                    false -> {
+                        // Keepalive disabled, don't reschedule
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Keepalive ping error: ${e.message}", e)
+            }
+        }
+    }
 }
+

@@ -106,6 +106,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- Keepalive Receiver (Doze Mode Prevention) -->
+        <receiver
+            android:name=".receivers.KeepAliveReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.blemqttbridge.ACTION_KEEPALIVE" />
+            </intent-filter>
+        </receiver>
+
         <!-- FileProvider for sharing debug logs and trace files -->
         <provider
             android:name="androidx.core.content.FileProvider"
