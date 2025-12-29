@@ -26,6 +26,10 @@
     
     <!-- Declare BLE feature requirement -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    
+    <!-- Android TV compatibility - make touchscreen optional -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
         android:name=".BlePluginBridgeApplication"
