@@ -1323,15 +1323,6 @@ class OneControlGattCallback(
             pendingDimmable.remove(entity.address)
         }
         
-        // Spurious status guard: Gateway sometimes sends brightness=0 status updates even when light is on
-        // Ignore these if we have a last known brightness > 0 (light should be on)
-        val lastKnown = lastKnownDimmableBrightness[entity.address]
-        Log.d(TAG, "Spurious check: brightness=${entity.brightness} mode=${entity.mode} lastKnown=$lastKnown")
-        if (entity.brightness == 0 && entity.mode == 0 && lastKnown != null && lastKnown > 0) {
-            Log.i(TAG, "🚫 Ignoring spurious off-state status (last known=$lastKnown)")
-            return  // Don't publish this spurious update
-        }
-        
         // Track last known brightness for restore-on-ON feature
         // Only update when we receive non-zero brightness (never clear from status updates)
         if (entity.brightness > 0) {

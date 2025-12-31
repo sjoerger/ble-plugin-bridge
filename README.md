@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.3.8 - Fixed text input cursor jumping, permission crashes, and OneControl health indicator
+**Current Version:** v2.3.9 - Fixed dimmable light panel updates not syncing to Home Assistant
 
 ## 🚀 Quick Start
 

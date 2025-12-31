@@ -2,14 +2,19 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** December 30, 2025 - v2.3.8  
-> **Major Changes (v2.3.8):**  
+> **Last Updated:** December 30, 2025 - v2.3.9  
+> **Major Changes (v2.3.9):**  
+> - **Dimmable Light Panel Sync Fix:** Removed overly-aggressive spurious status guard that blocked panel-initiated updates
+> - Panel operations (ON/OFF/dimming) now update Home Assistant immediately
+> - Pending guard still protects against spurious updates during HA→panel commands
+> 
+> **Previous Changes (v2.3.8):**  
 > - **Text Input Fix:** Fixed cursor jumping on keystroke by using local mutableStateOf() instead of collectAsState()
 > - **Permission Fixes:** Added SCHEDULE_EXACT_ALARM, USE_EXACT_ALARM, and BLUETOOTH_SCAN neverForLocation flag
 > - **Automatic Permissions:** Added checkAndRequestPermissionsOnStartup() in MainActivity.onCreate()
 > - **OneControl DataHealthy:** Fixed bouncing indicator by removing time-based check for event-driven plugin
 > 
-> **Previous Changes (v2.3.7):**  
+> **Changes (v2.3.7):**  
 > - **Keepalive Scheduling Fix:** Fixed critical bug where keepalive would not schedule if service started from UI instead of explicit intent
 > - **Multi-path Scheduling:** Keepalive now schedules in onCreate() as backup, onStartCommand with ACTION_START_SCAN, and null action handler
 > - **Android TV Compatibility:** Added optional touchscreen and leanback features for Android TV box support
