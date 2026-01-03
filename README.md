@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.0 - Added connection watchdog and fixed diagnostic sensor availability tracking
+**Current Version:** v2.4.1 - GoPower energy sensor (Wh conversion), unlock sequence for reboot command, removed unreliable diagnostic sensors
 
 ## 🚀 Quick Start
 
@@ -172,23 +172,20 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 | Sensor | Description | Unit |
 |--------|-------------|------|
 | PV Voltage | Solar panel voltage | V |
+| PV Current | Solar panel current | A |
+| PV Power | Solar input power | W |
 | Battery Voltage | Battery voltage | V |
-| Charge Current | Charging current | A |
-| Charge Power | Charging power (calculated) | W |
 | Battery Percentage | State of charge | % |
-| Load Current | Load current | A |
-| Load Power | Load power (calculated) | W |
 | Controller Temperature | Internal temperature | °C |
-| Load Status | Load output on/off | binary |
+| Energy | Daily energy production (Ah × voltage) | Wh |
 | Device Model | Controller model number | text |
-| Device Serial | Serial number (decimal) | text |
 | Device Firmware | Firmware version | text |
 
 #### Troubleshooting
 
 - **No data received:** Ensure controller is in BLE range (within ~30 feet)
-- **Wrong serial number:** Plugin converts hex to decimal to match official app
 - **Connection drops:** Verify no other device is connected to the controller
+- **Reboot button doesn't work:** The unlock sequence is sent but controller may not respond to BLE reboot commands
 
 ---
 

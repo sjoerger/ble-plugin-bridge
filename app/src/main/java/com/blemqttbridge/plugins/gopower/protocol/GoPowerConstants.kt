@@ -81,11 +81,14 @@ object GoPowerConstants {
     /** Field 17: Temperature Fahrenheit (signed, e.g., +43 = 43°F) */
     const val FIELD_TEMP_F = 17
     
-    /** Field 19: Amp-hours (Ah) */
-    const val FIELD_AMP_HOURS = 19
+    /** Field 19: Amp-hours Today (Ah, resets daily at midnight) - All models */
+    const val FIELD_AMP_HOURS_TODAY = 19
     
-    /** Field 24: Energy Today (Wh) */
-    const val FIELD_ENERGY_TODAY = 24
+    /** Field 20: Amp-hours Yesterday (Ah) */
+    const val FIELD_AMP_HOURS_YESTERDAY = 20
+    
+    /** Field 24: Amp-hours Last 7 Days (Ah, cumulative weekly total) */
+    const val FIELD_AMP_HOURS_WEEK = 24
     
     /** Field 8: Firmware Version (Integer) */
     const val FIELD_FIRMWARE = 8
@@ -93,9 +96,22 @@ object GoPowerConstants {
     /** Field 14: Serial Number (Integer) */
     const val FIELD_SERIAL = 14
     
-    // ===== MODBUS COMMANDS =====
-    // Some commands use Modbus binary frames
+    // ===== CONTROLLER COMMANDS =====
+    // Some commands use ASCII strings, others use Modbus binary frames
+    // IMPORTANT: Commands require unlock sequence to be sent first!
     
-    /** Reboot/Factory Reset command (Modbus frame) */
-    val REBOOT_COMMAND: ByteArray = byteArrayOf(1, 120, 0, 0, 0, 1, 96, 0)
+    /** Unlock command sequence - MUST be sent before settings/reboot commands */
+    val UNLOCK_COMMAND: ByteArray = "&G++0900".toByteArray(Charsets.UTF_8)
+    
+    /** Delay after unlock before sending actual command (ms) */
+    const val UNLOCK_DELAY_MS = 200L
+    
+    /** Soft Reset/Reboot command - reboots controller without clearing settings (ASCII) */
+    val REBOOT_COMMAND: ByteArray = "&LDD0100".toByteArray(Charsets.UTF_8)
+    
+    /** Factory Reset command - clears all settings and reboots (ASCII) */
+    val FACTORY_RESET_COMMAND: ByteArray = "&LDD0000".toByteArray(Charsets.UTF_8)
+    
+    /** Reset History command - clears amp-hour history counters (ASCII) */
+    val RESET_HISTORY_COMMAND: ByteArray = "&LDD0200".toByteArray(Charsets.UTF_8)
 }

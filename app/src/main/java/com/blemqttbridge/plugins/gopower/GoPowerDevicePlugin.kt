@@ -170,6 +170,11 @@ class GoPowerGattCallback(
     private var deviceSerial: String = "Unknown"
     private var deviceFirmware: String = "Unknown"
     
+    // Feature detection - track if auxiliary battery is present
+    private var hasAuxBattery: Boolean = false
+    private var auxBatteryCheckCount: Int = 0
+    private val AUX_BATTERY_CHECK_SAMPLES = 3  // Check first 3 readings
+    
     // Response buffer for multi-packet responses
     private val responseBuffer = StringBuilder()
     
@@ -406,6 +411,9 @@ class GoPowerGattCallback(
             return
         }
         
+        // Debug: Log ALL 32 fields to identify which contains resettable Ah counter
+        Log.d(TAG, "ALL FIELDS: ${fields.mapIndexed { index, value -> "[$index]=$value" }.joinToString(", ")}")
+        
         try {
             // Parse fields with scaling
             val solarCurrentMa = fields.getOrNull(GoPowerConstants.FIELD_SOLAR_CURRENT)?.trim()?.toIntOrNull() ?: 0
@@ -414,8 +422,11 @@ class GoPowerGattCallback(
             val solarVoltageMv = fields.getOrNull(GoPowerConstants.FIELD_SOLAR_VOLTAGE)?.trim()?.toIntOrNull() ?: 0
             val tempC = parseSignedInt(fields.getOrNull(GoPowerConstants.FIELD_TEMP_C)?.trim())
             val tempF = parseSignedInt(fields.getOrNull(GoPowerConstants.FIELD_TEMP_F)?.trim())
-            val ampHours = fields.getOrNull(GoPowerConstants.FIELD_AMP_HOURS)?.trim()?.toIntOrNull() ?: 0
-            val energyToday = fields.getOrNull(GoPowerConstants.FIELD_ENERGY_TODAY)?.trim()?.toIntOrNull() ?: 0
+            
+            // Parse amp-hours field (current accumulated charge)
+            val ampHours = fields.getOrNull(GoPowerConstants.FIELD_AMP_HOURS_TODAY)?.trim()?.toIntOrNull() ?: 0
+            
+            Log.d(TAG, "Amp-hours: $ampHours Ah")
             
             // Parse device info
             val firmware = fields.getOrNull(GoPowerConstants.FIELD_FIRMWARE)?.trim()?.toIntOrNull()
@@ -440,6 +451,9 @@ class GoPowerGattCallback(
             val solarVoltage = solarVoltageMv / 1000.0
             val solarPower = solarVoltage * solarCurrent  // Calculate solar power in watts
             
+            // Convert Ah to Wh for energy dashboard: Wh = Ah × Voltage
+            val energyWh = (ampHours * batteryVoltage).toInt()
+            
             val state = GoPowerState(
                 solarVoltage = solarVoltage,
                 solarCurrent = solarCurrent,
@@ -448,13 +462,16 @@ class GoPowerGattCallback(
                 stateOfCharge = soc,
                 temperatureC = tempC,
                 temperatureF = tempF,
-                ampHours = ampHours,
-                energyTodayWh = energyToday
+                ampHours = energyWh,  // Now contains Wh instead of Ah
+                ampHoursAux = 0  // Not used
             )
             
-            Log.i(TAG, "Parsed: PV=${solarVoltage}V ${solarCurrent}A ${solarPower}W, Batt=${batteryVoltage}V ${soc}%, Temp=${tempC}°C")
+            Log.i(TAG, "Parsed: PV=${solarVoltage}V ${solarCurrent}A ${solarPower}W, Batt=${batteryVoltage}V ${soc}%, Energy=${energyWh}Wh, Temp=${tempC}°C")
             
             currentState = state
+            
+            // All models use single daily amp-hour counter - no aux battery
+            hasAuxBattery = false
             
             // Publish discovery on first data
             if (!discoveryPublished) {
@@ -522,17 +539,19 @@ class GoPowerGattCallback(
             })
         }
         
-        // Define sensors
-        val sensors = listOf(
+        // Define sensors (common to all models)
+        val commonSensors = listOf(
             SensorConfig("solar_voltage", "Solar Voltage", "V", "voltage", "measurement", "mdi:solar-panel", "$baseTopic/solar_voltage"),
             SensorConfig("solar_current", "Solar Current", "A", "current", "measurement", "mdi:current-dc", "$baseTopic/solar_current"),
             SensorConfig("solar_power", "Solar Power", "W", "power", "measurement", "mdi:solar-power", "$baseTopic/solar_power"),
             SensorConfig("battery_voltage", "Battery Voltage", "V", "voltage", "measurement", "mdi:car-battery", "$baseTopic/battery_voltage"),
             SensorConfig("state_of_charge", "State of Charge", "%", "battery", "measurement", "mdi:battery", "$baseTopic/state_of_charge"),
             SensorConfig("temperature", "Temperature", "°C", "temperature", "measurement", "mdi:thermometer", "$baseTopic/temperature"),
-            SensorConfig("energy_today", "Energy Today", "Wh", "energy", "total_increasing", "mdi:lightning-bolt", "$baseTopic/energy_today"),
-            SensorConfig("amp_hours", "Amp Hours", "Ah", null, "total_increasing", "mdi:battery-charging", "$baseTopic/amp_hours")
+            SensorConfig("energy", "Energy", "Wh", "energy", "total_increasing", "mdi:lightning-bolt", "$baseTopic/energy")
         )
+        
+        // Build final sensor list
+        val sensors = commonSensors
         
         // Publish sensor discovery
         sensors.forEach { sensor ->
@@ -593,8 +612,7 @@ class GoPowerGattCallback(
         mqttPublisher.publishState("$baseTopic/battery_voltage", "%.3f".format(state.batteryVoltage), true)
         mqttPublisher.publishState("$baseTopic/state_of_charge", state.stateOfCharge.toString(), true)
         mqttPublisher.publishState("$baseTopic/temperature", state.temperatureC.toString(), true)
-        mqttPublisher.publishState("$baseTopic/energy_today", state.energyTodayWh.toString(), true)
-        mqttPublisher.publishState("$baseTopic/amp_hours", state.ampHours.toString(), true)
+        mqttPublisher.publishState("$baseTopic/energy", state.ampHours.toString(), true)  // ampHours field now contains Wh
         
         DebugLog.d(TAG, "Published state")
     }
@@ -620,22 +638,44 @@ class GoPowerGattCallback(
     }
     
     /**
-     * Send reboot command to controller
+     * Send soft reset/reboot command to controller.
+     * This reboots the controller without clearing any settings.
+     * IMPORTANT: Must send unlock sequence first!
      */
     private fun sendRebootCommand(): Result<Unit> {
         val char = writeChar ?: return Result.failure(Exception("Write characteristic not available"))
         val g = gatt ?: return Result.failure(Exception("GATT not connected"))
         
-        Log.i(TAG, "Sending reboot command...")
+        Log.i(TAG, "Sending unlock sequence before reboot...")
         
-        char.value = GoPowerConstants.REBOOT_COMMAND
-        return if (g.writeCharacteristic(char)) {
-            Log.i(TAG, "Reboot command sent")
-            Result.success(Unit)
-        } else {
-            Log.e(TAG, "Failed to send reboot command")
-            Result.failure(Exception("Failed to write reboot command"))
+        // Step 1: Send unlock command
+        char.value = GoPowerConstants.UNLOCK_COMMAND
+        if (!g.writeCharacteristic(char)) {
+            Log.e(TAG, "Failed to send unlock command")
+            return Result.failure(Exception("Failed to write unlock command"))
         }
+        
+        Log.i(TAG, "Unlock command sent, waiting ${GoPowerConstants.UNLOCK_DELAY_MS}ms before reboot...")
+        
+        // Step 2: Send reboot command after delay (must be on main thread)
+        mainHandler.postDelayed({
+            val writeCharDelay = writeChar
+            val gattDelay = gatt
+            
+            if (writeCharDelay == null || gattDelay == null) {
+                Log.e(TAG, "Lost connection before reboot command could be sent")
+                return@postDelayed
+            }
+            
+            writeCharDelay.value = GoPowerConstants.REBOOT_COMMAND
+            if (gattDelay.writeCharacteristic(writeCharDelay)) {
+                Log.i(TAG, "Soft reset/reboot command sent (after unlock)")
+            } else {
+                Log.e(TAG, "Failed to send reboot command after unlock")
+            }
+        }, GoPowerConstants.UNLOCK_DELAY_MS)
+        
+        return Result.success(Unit)
     }
     
     // ===== DIAGNOSTIC HEALTH STATUS =====
@@ -669,16 +709,18 @@ class GoPowerGattCallback(
         }
         
         // Diagnostic sensors to publish (no authentication needed for GoPower)
-        val diagnostics = listOf(
+        val binarySensors = listOf(
             Triple("connected", "Connected", "diag/connected"),
-            Triple("data_healthy", "Data Healthy", "diag/data_healthy"),
+            Triple("data_healthy", "Data Healthy", "diag/data_healthy")
+        )
+        
+        val textSensors = listOf(
             Triple("model_number", "Model Number", "diag/model_number"),
-            Triple("serial_number", "Serial Number", "diag/serial_number"),
             Triple("firmware_version", "Firmware Version", "diag/firmware_version")
         )
         
         // Binary sensors (connected, data_healthy)
-        diagnostics.take(2).forEach { (objectId, name, stateTopic) ->
+        binarySensors.forEach { (objectId, name, stateTopic) ->
             val uniqueId = "gopower_${macId}_diag_$objectId"
             val discoveryTopic = "$prefix/binary_sensor/$nodeId/$objectId/config"
             
@@ -699,8 +741,8 @@ class GoPowerGattCallback(
             Log.i(TAG, "Published diagnostic discovery: $objectId")
         }
         
-        // Text sensors (model, serial, firmware)
-        diagnostics.drop(2).forEach { (objectId, name, stateTopic) ->
+        // Text sensors (model, serial, firmware, fault_code, fault_description)
+        textSensors.forEach { (objectId, name, stateTopic) ->
             val uniqueId = "gopower_${macId}_diag_$objectId"
             val discoveryTopic = "$prefix/sensor/$nodeId/$objectId/config"
             
@@ -731,7 +773,6 @@ class GoPowerGattCallback(
         
         // Publish device info
         mqttPublisher.publishState("$baseTopic/diag/model_number", deviceModel, true)
-        mqttPublisher.publishState("$baseTopic/diag/serial_number", deviceSerial, true)
         mqttPublisher.publishState("$baseTopic/diag/firmware_version", deviceFirmware, true)
         
         // Update UI status for this plugin (no auth for GoPower)
@@ -757,8 +798,8 @@ data class GoPowerState(
     val stateOfCharge: Int,        // Battery SOC (%)
     val temperatureC: Int,         // Temperature (°C)
     val temperatureF: Int,         // Temperature (°F)
-    val ampHours: Int,             // Amp-hours
-    val energyTodayWh: Int         // Energy harvested today (Wh)
+    val ampHours: Int,             // Energy in Wh (converted from Ah × voltage)
+    val ampHoursAux: Int           // Amp-hours Battery 2 (not used)
 )
 
 /**

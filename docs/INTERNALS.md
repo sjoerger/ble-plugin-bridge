@@ -2,8 +2,14 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 3, 2026 - v2.4.0  
-> **Major Changes (v2.4.0):**  
+> **Last Updated:** January 3, 2026 - v2.4.1  
+> **Major Changes (v2.4.1):**  
+> - **GoPower Energy Sensor:** New "Energy" sensor shows daily energy production in Wh (Ah × battery voltage)
+> - **GoPower Protocol Cleanup:** Removed unreliable serial number sensor, simplified to essential sensors only
+> - **GoPower Reboot Command:** Added unlock sequence (&G++0900) before reboot command per official app protocol
+> - **Removed Historical Fault Sensors:** Field 5 contains historical fault data, not current fault status - removed as misleading
+>
+> **Previous Changes (v2.4.0):**  
 > - **Connection Watchdog:** Added 60-second watchdog to detect zombie states and stale connections
 > - **Diagnostic Sensor LWT:** All diagnostic sensors now reference global availability topic for proper offline status
 > - **OneControl Disconnect Fix:** Diagnostic state now updates immediately on disconnect
@@ -1156,116 +1162,88 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 
 | Characteristic | Value |
 |---------------|-------|
-| Connection Type | BLE notifications only (read-only) |
+| Connection Type | BLE notifications + write commands |
 | Pairing | Not required (no bonding needed) |
 | Authentication | None |
 | Service UUID | `0000fff0-0000-1000-8000-00805f9b34fb` |
 | Notify UUID | `0000fff1-0000-1000-8000-00805f9b34fb` |
-| Data Format | Fixed 20-byte comma-delimited ASCII string |
-| Update Rate | ~1 second (automatic from controller) |
-| Encoding | ASCII text, fields separated by commas |
+| Write UUID | `0000fff2-0000-1000-8000-00805f9b34fb` |
+| Data Format | Semicolon-delimited ASCII string (32 fields) |
+| Update Rate | ~1 second (polled via 0x20 command) |
+| Encoding | ASCII text, fields separated by semicolons |
 
 ### Notification Data Format
 
-The controller sends a 20-byte notification containing comma-separated integer values:
+The controller responds to a poll command (0x20) with a semicolon-delimited ASCII string containing 32 fields:
 
 ```
-Format: "f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15"
-Example: "123,456,789,0,1,2,3,4,5,6,7,8,9,10,ABC,16"
+Format: "f0;f1;f2;...;f31"
+Example: "00123;00456;00789;..."
 
-Field Mapping (0-indexed):
-Field 0:  PV Voltage (integer, divide by 10 for actual voltage)
-Field 1:  Battery Voltage (integer, divide by 10 for actual voltage)
-Field 2:  Charge Current (integer, divide by 100 for actual amperage)
-Field 3:  Controller Temperature (integer, degrees Celsius)
-Field 4:  Battery Percentage (integer, 0-100%)
-Field 5:  Load Current (integer, divide by 100 for actual amperage)
-Field 6:  Load Status (integer, 0=off, 1=on)
-Field 7:  Unknown / Reserved
-Field 8:  Firmware Version (integer, e.g., 5 = v5)
-Field 9:  Unknown / Reserved
-Field 10: Unknown / Reserved
-Field 11: Unknown / Reserved
-Field 12: Unknown / Reserved
-Field 13: Unknown / Reserved
-Field 14: Serial Number (hex string, needs conversion to decimal)
-Field 15: Unknown / Reserved
+Key Field Mapping (0-indexed):
+Field 0:  PV Voltage (divide by 10 for volts)
+Field 2:  PV Current (divide by 100 for amps)  
+Field 7:  Battery Voltage (divide by 10 for volts)
+Field 12: Battery SOC percentage
+Field 14: Controller Temperature (°C)
+Field 15: Model ID (e.g., 20480 = GP-PWM-30-SB)
+Field 19: "Ah Today" - Daily energy in Ah (divide by 100)
+Field 26: Firmware version
 ```
+
+**Note:** The protocol uses semicolons, not commas. Fields are zero-padded 5-digit integers.
 
 ### Key Implementation Details
 
-#### Serial Number Hex Parsing
+#### Energy Calculation (Wh)
 
-Field 14 contains the device serial number as a **hexadecimal string** that must be converted to decimal:
+The plugin converts the controller's "Ah Today" value (Field 19) to Watt-hours using the current battery voltage:
 
 ```kotlin
-// GoPowerConstants.kt
-const val FIELD_SERIAL = 14
-const val FIELD_FIRMWARE = 8
-
 // GoPowerDevicePlugin.kt
-private fun parseStatusNotification(data: ByteArray) {
-    val dataString = String(data, Charsets.UTF_8).trim()
-    val fields = dataString.split(",")
-    
-    if (fields.size >= FIELD_SERIAL + 1) {
-        val serialHex = fields[FIELD_SERIAL].trim()
-        try {
-            // Convert hex string to decimal (e.g., "177" hex -> "375" decimal)
-            deviceSerial = serialHex.toInt(16).toString()
-        } catch (e: NumberFormatException) {
-            Log.w(TAG, "Failed to parse serial number: $serialHex")
-            deviceSerial = "unknown"
-        }
-    }
-}
+val ahToday = fields.getOrNull(GoPowerConstants.FIELD_AH_TODAY)
+    ?.toIntOrNull()?.let { it / 100.0 } ?: 0.0
+val batteryVoltage = fields.getOrNull(GoPowerConstants.FIELD_BATTERY_VOLTAGE)
+    ?.toIntOrNull()?.let { it / 10.0 } ?: 0.0
+val energyWh = ahToday * batteryVoltage
 ```
 
-**Important:** The official GoPower app displays serial numbers in **decimal**, not hex. Field 14's raw value (e.g., `"177"`) must be interpreted as hexadecimal (`0x177 = 375 decimal`) to match the official app.
+**Note:** This provides an approximate Wh value. True Wh would require integrating power over time, but Ah × V gives a reasonable estimate for display purposes.
 
 #### Model Number Detection
 
-The GoPower controller does not report its model number via BLE. The plugin derives the model from the serial number prefix:
+The controller reports a model ID in Field 15. Known mappings:\n\n```kotlin\n// GoPowerConstants.kt\nconst val MODEL_GP_PWM_30_SB = 20480\n\n// GoPowerDevicePlugin.kt\nval modelId = fields.getOrNull(GoPowerConstants.FIELD_MODEL_ID)?.toIntOrNull() ?: 0\nval modelName = when (modelId) {\n    GoPowerConstants.MODEL_GP_PWM_30_SB -> \"GP-PWM-30-SB\"\n    else -> \"Unknown ($modelId)\"\n}\n```
 
-```kotlin
-// Serial numbers starting with "3" are GP-PWM-30-SB model
-deviceModel = when {
-    deviceSerial.startsWith("3") -> "GP-PWM-30-SB"
-    else -> "GP-PWM-30-SB"  // Default assumption
-}
-```
+#### Polling Protocol
 
-This heuristic may need adjustment as more models are supported.
-
-#### Data Parsing and Validation
+Unlike OneControl (event-driven) or EasyTouch (JSON polling), GoPower uses a simple byte command:
 
 ```kotlin
 private fun parseStatusNotification(data: ByteArray) {
     val dataString = String(data, Charsets.UTF_8).trim()
-    val fields = dataString.split(",")
+    val fields = dataString.split(";")  // Semicolon-delimited
     
-    // Validate field count
-    if (fields.size < 15) {
+    // Validate field count (expect 32 fields)
+    if (fields.size < 27) {
         Log.w(TAG, "Incomplete data: ${fields.size} fields")
         return
     }
     
     try {
         // Parse sensors with scaling
-        val pvVoltage = fields[0].toIntOrNull()?.let { it / 10.0f } ?: 0f
-        val batteryVoltage = fields[1].toIntOrNull()?.let { it / 10.0f } ?: 0f
-        val chargeCurrent = fields[2].toIntOrNull()?.let { it / 100.0f } ?: 0f
-        val batteryPercent = fields[4].toIntOrNull() ?: 0
-        val loadCurrent = fields[5].toIntOrNull()?.let { it / 100.0f } ?: 0f
-        val temperature = fields[3].toIntOrNull() ?: 0
-        val loadOn = fields[6].toIntOrNull() == 1
+        val pvVoltage = fields[FIELD_PV_VOLTAGE].toIntOrNull()?.let { it / 10.0 } ?: 0.0
+        val pvCurrent = fields[FIELD_PV_CURRENT].toIntOrNull()?.let { it / 100.0 } ?: 0.0
+        val batteryVoltage = fields[FIELD_BATTERY_VOLTAGE].toIntOrNull()?.let { it / 10.0 } ?: 0.0
+        val batteryPercent = fields[FIELD_BATTERY_SOC].toIntOrNull() ?: 0
+        val temperature = fields[FIELD_TEMPERATURE].toIntOrNull() ?: 0
+        val ahToday = fields[FIELD_AH_TODAY].toIntOrNull()?.let { it / 100.0 } ?: 0.0
         
         // Calculate derived values
-        val chargeWatts = pvVoltage * chargeCurrent
-        val loadWatts = batteryVoltage * loadCurrent
+        val pvPower = pvVoltage * pvCurrent
+        val energyWh = ahToday * batteryVoltage
         
         // Publish to MQTT
-        publishSensorData(pvVoltage, batteryVoltage, chargeCurrent, ...)
+        publishSensorData(pvVoltage, pvCurrent, pvPower, batteryVoltage, ...)
         
     } catch (e: Exception) {
         Log.e(TAG, "Error parsing status", e)
@@ -1280,17 +1258,17 @@ The plugin publishes the following sensors to Home Assistant:
 | Entity Type | Entity ID | Description | Unit | Device Class |
 |------------|-----------|-------------|------|--------------|
 | Sensor | `pv_voltage` | Solar panel voltage | V | voltage |
+| Sensor | `pv_current` | Solar panel current | A | current |
+| Sensor | `pv_power` | Solar input power | W | power |
 | Sensor | `battery_voltage` | Battery voltage | V | voltage |
-| Sensor | `charge_current` | Charge current | A | current |
-| Sensor | `charge_watts` | Charge power (calculated) | W | power |
-| Sensor | `battery_percent` | Battery state of charge | % | battery |
-| Sensor | `load_current` | Load current | A | current |
-| Sensor | `load_watts` | Load power (calculated) | W | power |
-| Sensor | `controller_temp` | Controller temperature | °C | temperature |
-| Binary Sensor | `load_status` | Load output status | - | power |
-| Text Sensor | `device_model` | Device model number | - | diagnostic |
-| Text Sensor | `device_serial` | Device serial number (decimal) | - | diagnostic |
-| Text Sensor | `device_firmware` | Firmware version | - | diagnostic |
+| Sensor | `battery_soc` | Battery state of charge | % | battery |
+| Sensor | `temperature` | Controller temperature | °C | temperature |
+| Sensor | `energy` | Daily energy (Ah × voltage) | Wh | energy |
+| Text Sensor | `model_number` | Device model number | - | diagnostic |
+| Text Sensor | `firmware_version` | Firmware version | - | diagnostic |
+| Binary Sensor | `connected` | BLE connection status | - | connectivity |
+| Binary Sensor | `data_healthy` | Data health status | - | connectivity |
+| Button | `reboot` | Reboot controller | - | restart |
 
 ### Plugin Structure
 
@@ -1298,8 +1276,7 @@ The plugin publishes the following sensors to Home Assistant:
 plugins/gopower/
 ├── GoPowerDevicePlugin.kt          # Main plugin implementation
 ├── protocol/
-│   ├── GoPowerConstants.kt         # UUIDs and field indices
-│   └── GoPowerGattCallback.kt      # BLE notification handler
+│   └── GoPowerConstants.kt         # UUIDs, field indices, commands
 ```
 
 ### Configuration Requirements
@@ -1310,7 +1287,7 @@ Unlike OneControl, GoPower does not require pairing or authentication:
 2. Enable the GoPower plugin
 3. Enable the BLE Service
 
-The controller will immediately start sending status notifications.
+The plugin polls the controller at 1-second intervals.
 
 ### Key Differences from Other Plugins
 
@@ -1318,34 +1295,58 @@ The controller will immediately start sending status notifications.
 |---------|-----------|-----------|---------|
 | Pairing Required | Yes (bonding) | No | No |
 | Authentication | TEA encryption | Password auth | None |
-| Commands | Full bidirectional | Climate control | **None (read-only)** |
-| Notification Type | Event-driven | JSON status | Fixed ASCII string |
-| Data Format | COBS-encoded binary | JSON | Comma-delimited ASCII |
-| Heartbeat Needed | Yes (GetDevices) | No | No |
+| Commands | Full bidirectional | Climate control | Reboot only (via unlock) |
+| Notification Type | Event-driven | JSON status | Semicolon-delimited ASCII |
+| Data Format | COBS-encoded binary | JSON | Semicolon-delimited ASCII (32 fields) |
+| Heartbeat Needed | Yes (GetDevices) | No | Yes (0x20 poll command) |
 | Multi-device | Yes (gateway) | Yes (zones) | No (single controller) |
+
+### Reboot Command
+
+The GoPower controller supports a reboot command, but requires an unlock sequence first:
+
+```kotlin
+// GoPowerConstants.kt
+val UNLOCK_COMMAND = "&G++0900".toByteArray(Charsets.US_ASCII)
+val REBOOT_COMMAND = "&LDD0100".toByteArray(Charsets.US_ASCII)
+const val UNLOCK_DELAY_MS = 200L
+
+// GoPowerDevicePlugin.kt
+private fun sendRebootCommand() {
+    // Send unlock sequence first
+    writeCharacteristic?.let { char ->
+        char.value = GoPowerConstants.UNLOCK_COMMAND
+        currentGatt?.writeCharacteristic(char)
+    }
+    
+    // Wait for unlock to process, then send reboot
+    handler.postDelayed({
+        writeCharacteristic?.let { char ->
+            char.value = GoPowerConstants.REBOOT_COMMAND
+            currentGatt?.writeCharacteristic(char)
+        }
+    }, GoPowerConstants.UNLOCK_DELAY_MS)
+}
+```
+
+**Note:** The reboot command is exposed as a button entity in Home Assistant but may not actually reboot all controller models.
 
 ### Diagnostic Sensors
 
-The GoPower plugin adds three diagnostic text sensors for device identification and troubleshooting:
+The GoPower plugin publishes diagnostic sensors for device identification:
 
 ```kotlin
 // Published on connect and when data is first received
 publishDiagnosticSensor(
-    objectId = "device_model",
-    name = "Device Model",
-    value = deviceModel  // "GP-PWM-30-SB"
+    objectId = "model_number",
+    name = "Model Number",
+    value = modelName  // "GP-PWM-30-SB"
 )
 
 publishDiagnosticSensor(
-    objectId = "device_serial", 
-    name = "Device Serial",
-    value = deviceSerial  // Decimal format (e.g., "375")
-)
-
-publishDiagnosticSensor(
-    objectId = "device_firmware",
-    name = "Device Firmware",
-    value = deviceFirmware  // Integer version (e.g., "5")
+    objectId = "firmware_version",
+    name = "Firmware Version",
+    value = firmware  // e.g., "V1.5"
 )
 ```
 
@@ -1372,20 +1373,16 @@ This allows the UI to display GoPower's connection status independently from oth
 | Issue | Cause | Solution |
 |-------|-------|----------|
 | No data received | Controller out of range | Move Android device closer |
-| Serial shows "unknown" | Field 14 parse error | Check notification format matches spec |
-| Wrong serial number | Decimal/hex confusion | Ensure using `toInt(16)` conversion |
 | Sensors not appearing | Discovery not published | Check MQTT logs, verify baseTopic |
-| Load status incorrect | Field 6 not 0 or 1 | Validate notification data format |
+| Reboot doesn't work | Controller ignores BLE reboot | Physical power cycle required |
+| Energy shows 0 | No solar production yet | Normal when panels not producing |
 
-### Future Enhancements
+### Known Limitations
 
-Potential additions if GoPower releases command specifications:
-- Load output control (ON/OFF)
-- Charging parameters configuration
-- Battery type selection
-- Temperature compensation settings
-
-Currently, the GoPower protocol is **read-only** - the controller does not accept write commands via BLE.
+- **Field 5 (fault code)** contains historical faults, not current faults - removed from sensors
+- **Serial number** field was unreliable and removed
+- **Reboot command** sends correctly but controller may not respond
+- **Load sensors** were removed as not all models support load output
 
 ---
 
