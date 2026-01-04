@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.1 - GoPower energy sensor (Wh conversion), unlock sequence for reboot command, removed unreliable diagnostic sensors
+**Current Version:** v2.4.2 - Fire tablet compatibility fix
 
 ## 🚀 Quick Start
 

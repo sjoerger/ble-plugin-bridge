@@ -2,8 +2,11 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 3, 2026 - v2.4.1  
-> **Major Changes (v2.4.1):**  
+> **Last Updated:** January 4, 2026 - v2.4.2  
+> **Major Changes (v2.4.2):**  
+> - **Fire Tablet Compatibility:** Added `tools:targetApi="s"` annotations to Android 12+ BLE permissions for compatibility with older Fire OS versions
+>
+> **Previous Changes (v2.4.1):**  
 > - **GoPower Energy Sensor:** New "Energy" sensor shows daily energy production in Wh (Ah × battery voltage)
 > - **GoPower Protocol Cleanup:** Removed unreliable serial number sensor, simplified to essential sensors only
 > - **GoPower Reboot Command:** Added unlock sequence (&G++0900) before reboot command per official app protocol
