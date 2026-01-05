@@ -1,13 +1,18 @@
 package com.blemqttbridge.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,6 +25,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.blemqttbridge.ui.viewmodel.SettingsViewModel
+import com.blemqttbridge.utils.AndroidTvHelper
 import com.blemqttbridge.utils.BatteryOptimizationHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -297,6 +303,209 @@ fun SystemSettingsScreen(
                         } catch (_: Exception) {}
                     }
                 )
+            }
+            
+            // Android TV Section - Only show on Android TV devices
+            val isAndroidTv = remember { AndroidTvHelper.isAndroidTv(context) }
+            
+            if (isAndroidTv) {
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                SectionHeader("Android TV Power Fix")
+                
+                var hasSecureSettingsPermission by remember {
+                    mutableStateOf(AndroidTvHelper.hasWriteSecureSettingsPermission(context))
+                }
+                var cecAutoOffEnabled by remember {
+                    mutableStateOf(AndroidTvHelper.isCecAutoOffEnabled(context))
+                }
+                
+                // Refresh state when screen becomes visible
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event == Lifecycle.Event.ON_RESUME) {
+                            hasSecureSettingsPermission = AndroidTvHelper.hasWriteSecureSettingsPermission(context)
+                            cecAutoOffEnabled = AndroidTvHelper.isCecAutoOffEnabled(context)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                    }
+                }
+                
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "HDMI-CEC Auto Device Off",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        Text(
+                            text = "When enabled, the TV can put this device to sleep via HDMI-CEC, which kills the service. Disable this to keep the service running when the TV powers off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        // Status indicator
+                        Text(
+                            text = AndroidTvHelper.getStatusMessage(context),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (cecAutoOffEnabled) 
+                                MaterialTheme.colorScheme.error 
+                            else 
+                                MaterialTheme.colorScheme.primary
+                        )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        
+                        if (hasSecureSettingsPermission) {
+                            // User has permission - show toggle
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "CEC Auto Device Off",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        text = if (cecAutoOffEnabled) "Enabled - Device sleeps with TV" else "Disabled - Service survives",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (cecAutoOffEnabled) 
+                                            MaterialTheme.colorScheme.error 
+                                        else 
+                                            MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                
+                                Switch(
+                                    checked = !cecAutoOffEnabled,  // Inverted: switch ON = CEC disabled = good
+                                    onCheckedChange = { wantDisabled ->
+                                        val success = AndroidTvHelper.setCecAutoOff(context, !wantDisabled)
+                                        if (success) {
+                                            cecAutoOffEnabled = !wantDisabled
+                                        }
+                                    }
+                                )
+                            }
+                        } else {
+                            // No permission - show ADB instructions
+                            Text(
+                                text = "⚠ Permission Required",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Text(
+                                text = "To enable automatic CEC control, grant WRITE_SECURE_SETTINGS via ADB (one-time setup):",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            val adbCommand = AndroidTvHelper.getGrantPermissionCommand(context)
+                            
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = adbCommand,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.weight(1f),
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    )
+                                    
+                                    IconButton(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            val clip = ClipData.newPlainText("ADB Command", adbCommand)
+                                            clipboard.setPrimaryClip(clip)
+                                            Toast.makeText(context, "Command copied!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "Copy command",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Text(
+                                text = "After granting permission, restart the app. The service will automatically disable CEC auto-off on startup.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            
+                            Spacer(modifier = Modifier.height(12.dp))
+                            
+                            // Alternative: Manual ADB fix
+                            Text(
+                                text = "Alternative: Disable CEC directly via ADB:",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            
+                            Spacer(modifier = Modifier.height(4.dp))
+                            
+                            val manualCommand = AndroidTvHelper.getDisableCecCommand()
+                            
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = manualCommand,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.weight(1f),
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    )
+                                    
+                                    IconButton(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            val clip = ClipData.newPlainText("ADB Command", manualCommand)
+                                            clipboard.setPrimaryClip(clip)
+                                            Toast.makeText(context, "Command copied!", Toast.LENGTH_SHORT).show()
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "Copy command",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             
             Spacer(modifier = Modifier.height(16.dp))

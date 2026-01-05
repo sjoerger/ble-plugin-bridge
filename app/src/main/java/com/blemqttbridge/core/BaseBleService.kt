@@ -21,6 +21,7 @@ import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
+import com.blemqttbridge.utils.AndroidTvHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import java.util.UUID
@@ -258,6 +259,13 @@ class BaseBleService : Service() {
         
         // Initialize AlarmManager for keepalive
         alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        
+        // Apply Android TV power fix if applicable
+        // This disables HDMI-CEC auto device off to prevent service from being killed
+        // when TV enters standby mode
+        if (AndroidTvHelper.applyRecommendedSettings(this)) {
+            Log.i(TAG, "📺 Android TV: Applied HDMI-CEC fix for service reliability")
+        }
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification("Service starting..."))

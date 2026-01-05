@@ -5,6 +5,24 @@ All notable changes to the BLE-MQTT Plugin Bridge project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.5] - 2026-01-04
+
+### Added
+- **Android TV Power Fix**: New feature to prevent service from being killed when TV enters standby
+  - Added `AndroidTvHelper` utility class for HDMI-CEC settings management
+  - New "Android TV Power Fix" section in System Settings (only visible on Android TV devices)
+  - Auto-detects Android TV via Leanback feature
+  - Displays HDMI-CEC auto device off status
+  - Provides ADB command with copy button to grant WRITE_SECURE_SETTINGS permission
+  - When permission is granted, service automatically disables CEC auto-off on startup
+  - Toggle to manually control CEC auto-off setting once permission is granted
+
+### Technical Details
+- Root cause: HDMI-CEC "auto device off" (`hdmi_control_auto_device_off_enabled=1`) causes streaming devices to sleep when TV sends CEC standby command, killing the foreground service
+- Solution: Disable CEC auto device off to keep service running when TV powers off
+- Permission: Requires `WRITE_SECURE_SETTINGS` which must be granted via ADB
+- ADB command: `adb shell pm grant com.blemqttbridge android.permission.WRITE_SECURE_SETTINGS`
+
 ## [2.4.3] - 2026-01-04
 
 ### Added
