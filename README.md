@@ -2,7 +2,7 @@
 
 Android foreground service that bridges BLE (Bluetooth Low Energy) devices to MQTT, enabling Home Assistant integration via a plugin-based architecture.
 
-**Current Version:** v2.4.6 - Android TV Power Fix, prevents service from being killed when TV enters standby
+**Current Version:** v2.4.7 - Critical bug fixes for BLE notifications and friendly names
 
 ## 🚀 Quick Start
 

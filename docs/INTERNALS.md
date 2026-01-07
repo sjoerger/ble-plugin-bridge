@@ -2,8 +2,16 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Last Updated:** January 5, 2026 - v2.4.6  
-> **Major Changes (v2.4.6):**  
+> **Last Updated:** January 6, 2026 - v2.4.7  
+> **Major Changes (v2.4.7):**  
+> - **Critical BLE Notification Race Condition Fix:** Added synchronization flags (servicesDiscovered, mtuReady) to OneControl plugin
+> - **Callback Synchronization:** Ensures both onServicesDiscovered and onMtuChanged complete before authentication begins
+> - **Fixes Regression:** Physical device state changes now properly update in Home Assistant
+> - **BLE Trace Logging:** All plugins (OneControl, EasyTouch, GoPower) now log GATT events for debugging
+> - **Friendly Name Fix:** Removed race condition preventing friendly device names from appearing in HA
+> - **Discovery Republishing:** Always publish discovery when metadata arrives, regardless of timing
+>
+> **Previous Changes (v2.4.6):**  
 > - **Android TV Power Fix:** Prevents foreground service from being killed when TV enters standby mode via HDMI-CEC
 > - **AndroidTvHelper Utility:** Detects Android TV, manages HDMI-CEC auto device off setting
 > - **Auto-Apply on Service Start:** Service automatically disables CEC auto-off when permission granted
@@ -397,29 +405,39 @@ DATA_READ_CHARACTERISTIC_UUID = "00000034-..."   // NOTIFY - events from gateway
 
 ### Authentication Flow
 
-**File:** `OneControlDevicePlugin.kt`, method `startAuthentication()`
+**File:** `OneControlDevicePlugin.kt`, method `checkAndStartAuthentication()`
+
+**CRITICAL:** The authentication sequence requires careful synchronization between `onServicesDiscovered()` and `onMtuChanged()` callbacks, as they execute on different threads and can race:
 
 ```
-1. onServicesDiscovered() 
+1. onConnectionStateChange(STATE_CONNECTED)
    ↓
-2. Request MTU = 185
+2. discoverServices()
    ↓
-3. onMtuChanged() → startAuthentication()
+3. onServicesDiscovered() → cache characteristics, set servicesDiscovered = true
+   ↓                         call checkAndStartAuthentication()
+4. requestMtu(185)
    ↓
-4. Read UNLOCK_STATUS (00000012) 
+5. onMtuChanged() → set mtuReady = true
+   ↓               call checkAndStartAuthentication()
+6. checkAndStartAuthentication() → only proceeds if BOTH flags true
    ↓
-5. handleUnlockStatusRead() - receives 4-byte challenge
+7. Read UNLOCK_STATUS (00000012) 
    ↓
-6. calculateAuthKey(challenge) - BIG-ENDIAN TEA encryption
+8. handleUnlockStatusRead() - receives 4-byte challenge
    ↓
-7. Write KEY to 00000013 (WRITE_TYPE_NO_RESPONSE)
+9. calculateAuthKey(challenge) - BIG-ENDIAN TEA encryption
    ↓
-8. Re-read UNLOCK_STATUS - should now return "Unlocked"
+10. Write KEY to 00000013 (WRITE_TYPE_NO_RESPONSE)
    ↓
-9. enableDataNotifications() - subscribe to 00000034
+11. Re-read UNLOCK_STATUS - should now return "Unlocked"
    ↓
-10. onAllNotificationsSubscribed() → startActiveStreamReading()
+12. enableDataNotifications() - subscribe to 00000034
+   ↓
+13. onAllNotificationsSubscribed() → startActiveStreamReading()
 ```
+
+**Race Condition Fix (v2.4.7):** Prior to v2.4.7, `onMtuChanged()` would directly call `startAuthentication()`, but this could fire before `onServicesDiscovered()` completed caching characteristic references, causing notifications to fail silently. The synchronization flags ensure both callbacks complete before authentication begins.
 
 #### TEA Encryption (Authentication Key Calculation)
 
@@ -2649,6 +2667,65 @@ if (age <= DIMMER_PENDING_WINDOW_MS && brightness != desired) {
 }
 ```
 
+### 8. BLE Trace Logging
+
+**Added in v2.4.7:** All plugins now implement BLE event logging via `mqttPublisher.logBleEvent()`:
+
+```kotlin
+// In GATT callbacks - all plugins
+override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+    val stateStr = when (newState) {
+        BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+        BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+        else -> "UNKNOWN($newState)"
+    }
+    mqttPublisher.logBleEvent("STATE_CHANGE: $stateStr (status=$status)")
+}
+
+override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+    val hex = data.joinToString(" ") { "%02X".format(it) }
+    mqttPublisher.logBleEvent("NOTIFY ${characteristic.uuid}: $hex")
+}
+
+override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+    val hex = characteristic.value?.joinToString(" ") { "%02X".format(it) } ?: "(null)"
+    mqttPublisher.logBleEvent("WRITE ${characteristic.uuid}: $hex (status=$status)")
+}
+```
+
+**Purpose:** Users can send trace files showing BLE traffic from their specific hardware variants (multi-zone thermostats, different heat modes, etc.) for debugging and adding support for new device features.
+
+**Trace File Location:** `/sdcard/Download/trace_YYYYMMDD_HHMMSS.log`
+
+**Example Trace Output:**
+```
+19:03:23.085 TRACE START ts=20260106_190323
+19:03:23.180 NOTIFY 00000034-0200-a58e-e411-afe28044e62c: 00 C5 06 08 08 80 FF 40 01 6D 00
+19:03:24.593 WRITE 00000033-0200-a58e-e411-afe28044e62c: 00 41 06 42 01 08 02 FF E8 00 (status=0)
+19:03:26.399 WRITE 0000fff2-0000-1000-8000-00805f9b34fb: 20 (status=0)
+19:03:26.656 WRITE 0000ee01-0000-1000-8000-00805f9b34fb: 7B 22 54 79 70 65 22 3A... (status=0)
+```
+
+### 9. Friendly Name Race Condition
+
+**Fixed in v2.4.7:** Previously, if `GetDevicesMetadata` response (with friendly names) arrived **before** entity state events, the friendly names were never applied because `republishDiscoveryWithFriendlyName()` checked `haDiscoveryPublished.contains()` first.
+
+**Solution:** Always publish all entity types when metadata arrives, adding them to the tracking set:
+
+```kotlin
+private fun republishDiscoveryWithFriendlyName(tableId: Int, deviceId: Int, friendlyName: String) {
+    // Publish switch discovery - even if not in haDiscoveryPublished yet
+    val switchDiscovery = HomeAssistantMqttDiscovery.getSwitchDiscovery(...)
+    mqttPublisher.publishDiscovery(switchDiscoveryTopic, switchDiscovery.toString())
+    haDiscoveryPublished.add("switch_$keyHex")
+    
+    // Publish light, cover, tank discoveries...
+    // (always publish, regardless of timing)
+}
+```
+
+**Result:** Entities now show friendly names like "Awning" instead of "cover_160a", regardless of metadata/state arrival order.
+
 ---
 
 ## Appendix: File Quick Reference
@@ -2684,5 +2761,5 @@ if (age <= DIMMER_PENDING_WINDOW_MS && brightness != desired) {
 
 ---
 
-*Document version: 2.3.1*
-*Last updated: December 26, 2025 - Added GoPower plugin, per-plugin status tracking, system diagnostics*
+*Document version: 2.4.7*
+*Last updated: January 6, 2026 - BLE notification race condition fix, BLE trace logging, friendly name fix*
