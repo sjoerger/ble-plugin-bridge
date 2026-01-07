@@ -35,7 +35,7 @@ echo ""
 
 # Start app
 echo "5️⃣ Starting app..."
-adb -s $DEVICE shell am start -n com.blemqttbridge/.ui.ServiceStatusActivity
+adb -s $DEVICE shell am start -n com.blemqttbridge/.MainActivity
 sleep 3
 echo "✓ App started"
 echo ""

@@ -209,6 +209,14 @@ class GoPowerGattCallback(
     
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         Log.i(TAG, "Connection state: $newState (status: $status)")
+        val stateStr = when (newState) {
+            BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+            BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+            BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+            BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+            else -> "UNKNOWN($newState)"
+        }
+        mqttPublisher.logBleEvent("STATE_CHANGE: $stateStr (status=$status)")
         
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
@@ -236,6 +244,7 @@ class GoPowerGattCallback(
     }
     
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        mqttPublisher.logBleEvent("SERVICES_DISCOVERED: status=$status, count=${gatt.services.size}")
         if (status != BluetoothGatt.GATT_SUCCESS) {
             Log.e(TAG, "Service discovery failed: $status")
             return
@@ -365,6 +374,8 @@ class GoPowerGattCallback(
         characteristic: BluetoothGattCharacteristic,
         status: Int
     ) {
+        val hex = characteristic.value?.joinToString(" ") { "%02X".format(it) } ?: "(null)"
+        mqttPublisher.logBleEvent("WRITE ${characteristic.uuid}: $hex (status=$status)")
         if (status == BluetoothGatt.GATT_SUCCESS) {
             DebugLog.d(TAG, "Characteristic write complete: ${characteristic.uuid}")
         } else {
@@ -381,6 +392,8 @@ class GoPowerGattCallback(
         val data = characteristic.value
         if (data == null || data.isEmpty()) return
         
+        val hex = data.joinToString(" ") { "%02X".format(it) }
+        mqttPublisher.logBleEvent("NOTIFY ${characteristic.uuid}: $hex")
         val chunk = String(data, StandardCharsets.UTF_8)
         DebugLog.d(TAG, "Received chunk: $chunk")
         

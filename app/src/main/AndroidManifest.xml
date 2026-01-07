@@ -64,11 +64,6 @@
             </intent-filter>
         </activity>
         
-        <!-- Service status and diagnostic UI -->
-        <activity
-            android:name=".ui.ServiceStatusActivity"
-            android:exported="true" />
-        
         <!-- BLE Bridge Service -->
         <service
             android:name=".core.BaseBleService"
