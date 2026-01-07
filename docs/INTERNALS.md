@@ -2,7 +2,7 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.4.8  
+> **Current Version:** v2.4.9  
 > **Last Updated:** January 7, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
@@ -50,10 +50,16 @@
 
 ### Recent Critical Changes
 
+**v2.4.9 (January 2026):**
+- Connection robustness improvements: Added GATT 133 retry logic to GoPower and EasyTouch
+- Per-plugin watchdog: Added connection health monitoring and zombie state detection
+- Persistent metadata cache: OneControl friendly names survive app restarts
+
 **v2.4.8 (January 2026):**
 - Multi-gateway support: Gateway and scanner devices now use Android device ID suffix
 - OneControl guard check fix: Restored guards preventing 4x entity duplication
 - Device IDs now include suffix: `ble_mqtt_bridge_{android_id}`, `ble_scanner_{android_id}`
+- EasyTouch fan mode fix: Fixed "Invalid fan_modes mode: off" error
 
 **v2.4.7 (January 2026):**
 - BLE notification race condition fix (servicesDiscovered/mtuReady flags)

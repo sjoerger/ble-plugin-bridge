@@ -182,6 +182,16 @@ class GoPowerGattCallback(
     private var isPollingActive = false
     private var isConnected = false
     
+    // GATT 133 retry tracking
+    private var gatt133RetryCount = 0
+    private val MAX_GATT_133_RETRIES = 3
+    private val GATT_133_RETRY_DELAY_MS = 2000L
+    
+    // Connection watchdog
+    private var watchdogRunnable: Runnable? = null
+    private var lastSuccessfulOperationTime: Long = System.currentTimeMillis()
+    private val WATCHDOG_INTERVAL_MS = 60000L  // Check connection health every 60s
+    
     private val statusPollRunnable = object : Runnable {
         override fun run() {
             if (!isPollingActive || !isConnected) {
@@ -218,26 +228,78 @@ class GoPowerGattCallback(
         }
         mqttPublisher.logBleEvent("STATE_CHANGE: $stateStr (status=$status)")
         
-        when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> {
-                Log.i(TAG, "Connected to ${device.address}")
-                this.gatt = gatt
-                isConnected = true
-                publishAvailability(true)
-                publishDiagnosticsDiscovery()
-                publishDiagnosticsState()
-                
-                // Discover services after brief delay
-                mainHandler.postDelayed({
-                    gatt.discoverServices()
-                }, GoPowerConstants.SERVICE_DISCOVERY_DELAY_MS)
+        when (status) {
+            BluetoothGatt.GATT_SUCCESS -> {
+                when (newState) {
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.i(TAG, "Connected to ${device.address}")
+                        this.gatt = gatt
+                        isConnected = true
+                        // Reset retry counter on successful connection
+                        gatt133RetryCount = 0
+                        lastSuccessfulOperationTime = System.currentTimeMillis()
+                        publishAvailability(true)
+                        publishDiagnosticsDiscovery()
+                        publishDiagnosticsState()
+                        
+                        // Discover services after brief delay
+                        mainHandler.postDelayed({
+                            gatt.discoverServices()
+                        }, GoPowerConstants.SERVICE_DISCOVERY_DELAY_MS)
+                    }
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        Log.w(TAG, "Disconnected from ${device.address}")
+                        cleanup()
+                        onDisconnect(device, status)
+                    }
+                }
             }
-            BluetoothProfile.STATE_DISCONNECTED -> {
-                Log.w(TAG, "Disconnected from ${device.address}")
-                stopStatusPolling()
-                isConnected = false
-                publishAvailability(false)
-                publishDiagnosticsState()
+            133 -> {
+                gatt133RetryCount++
+                Log.e(TAG, "⚠️ GATT_ERROR (133) - Connection failed (attempt $gatt133RetryCount/$MAX_GATT_133_RETRIES)")
+                cleanup()
+                
+                if (gatt133RetryCount < MAX_GATT_133_RETRIES) {
+                    Log.i(TAG, "🔄 Retrying connection in ${GATT_133_RETRY_DELAY_MS}ms...")
+                    mainHandler.postDelayed({
+                        try {
+                            Log.i(TAG, "🔄 Attempting reconnection (retry $gatt133RetryCount)...")
+                            val newGatt = device.connectGatt(
+                                context,
+                                false,
+                                this,
+                                BluetoothDevice.TRANSPORT_LE
+                            )
+                            if (newGatt != null) {
+                                this.gatt = newGatt
+                                Log.i(TAG, "🔄 Reconnection initiated")
+                            } else {
+                                Log.e(TAG, "❌ Failed to initiate reconnection")
+                                onDisconnect(device, status)
+                            }
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "❌ Permission denied for reconnection", e)
+                            onDisconnect(device, status)
+                        }
+                    }, GATT_133_RETRY_DELAY_MS)
+                } else {
+                    Log.e(TAG, "❌ Max retries ($MAX_GATT_133_RETRIES) reached - stopping reconnection attempts")
+                    onDisconnect(device, status)
+                }
+            }
+            8 -> {
+                Log.e(TAG, "⏱️ Connection timeout (status 8)")
+                cleanup()
+                onDisconnect(device, status)
+            }
+            19 -> {
+                Log.e(TAG, "🚫 Peer terminated connection (status 19)")
+                cleanup()
+                onDisconnect(device, status)
+            }
+            else -> {
+                Log.e(TAG, "❌ Connection failed with status: $status")
+                cleanup()
                 onDisconnect(device, status)
             }
         }
@@ -250,6 +312,7 @@ class GoPowerGattCallback(
             return
         }
         
+        lastSuccessfulOperationTime = System.currentTimeMillis()
         Log.i(TAG, "Services discovered")
         
         // Find GoPower service
@@ -335,6 +398,7 @@ class GoPowerGattCallback(
         Log.i(TAG, "Starting status polling loop (${GoPowerConstants.STATUS_POLL_INTERVAL_MS}ms interval)")
         isPollingActive = true
         publishDiagnosticsState()
+        startWatchdog()
         
         // Request first status immediately
         mainHandler.postDelayed({
@@ -346,6 +410,14 @@ class GoPowerGattCallback(
         Log.i(TAG, "Stopping status polling loop")
         isPollingActive = false
         mainHandler.removeCallbacks(statusPollRunnable)
+    }
+    
+    private fun cleanup() {
+        stopStatusPolling()
+        stopWatchdog()
+        isConnected = false
+        publishAvailability(false)
+        publishDiagnosticsState()
     }
     
     /**
@@ -392,6 +464,7 @@ class GoPowerGattCallback(
         val data = characteristic.value
         if (data == null || data.isEmpty()) return
         
+        lastSuccessfulOperationTime = System.currentTimeMillis()
         val hex = data.joinToString(" ") { "%02X".format(it) }
         mqttPublisher.logBleEvent("NOTIFY ${characteristic.uuid}: $hex")
         val chunk = String(data, StandardCharsets.UTF_8)
@@ -797,6 +870,49 @@ class GoPowerGattCallback(
         )
         
         DebugLog.d(TAG, "Published diagnostic state: connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$deviceSerial, fw=$deviceFirmware")
+    }    
+    /**
+     * Start connection watchdog - detects zombie states and stale connections
+     */
+    private fun startWatchdog() {
+        stopWatchdog()
+        
+        watchdogRunnable = object : Runnable {
+            override fun run() {
+                val currentGatt = gatt
+                val timeSinceLastOp = System.currentTimeMillis() - lastSuccessfulOperationTime
+                
+                Log.d(TAG, "🐕 Watchdog check: isConnected=$isConnected, gatt=${currentGatt != null}, timeSince=${timeSinceLastOp}ms")
+                
+                // Detect zombie state: should be connected but isn't
+                if (currentGatt != null && !isConnected) {
+                    Log.e(TAG, "🐕 ZOMBIE STATE DETECTED: GATT exists but isConnected=false")
+                    Log.e(TAG, "🐕 Forcing cleanup and reconnection...")
+                    cleanup()
+                    onDisconnect(device, -1)
+                }
+                // Detect stale connection: connected but no operations for 5 minutes
+                else if (isConnected && isPollingActive && timeSinceLastOp > 300000) {
+                    Log.e(TAG, "🐕 STALE CONNECTION DETECTED: No operations for ${timeSinceLastOp/1000}s")
+                    Log.e(TAG, "🐕 Forcing reconnection...")
+                    cleanup()
+                    onDisconnect(device, -1)
+                }
+                
+                mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            }
+        }
+        
+        mainHandler.postDelayed(watchdogRunnable!!, WATCHDOG_INTERVAL_MS)
+        Log.i(TAG, "🐕 Connection watchdog started (every ${WATCHDOG_INTERVAL_MS/1000}s)")
+    }
+    
+    private fun stopWatchdog() {
+        watchdogRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            watchdogRunnable = null
+            Log.d(TAG, "🐕 Watchdog stopped")
+        }
     }
 }
 

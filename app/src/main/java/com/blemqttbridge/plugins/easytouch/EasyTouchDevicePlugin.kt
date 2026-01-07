@@ -182,6 +182,16 @@ class EasyTouchGattCallback(
     private var isAuthenticated = false
     private var discoveryPublished = false
     
+    // GATT 133 retry tracking
+    private var gatt133RetryCount = 0
+    private val MAX_GATT_133_RETRIES = 3
+    private val GATT_133_RETRY_DELAY_MS = 2000L
+    
+    // Connection watchdog
+    private var watchdogRunnable: Runnable? = null
+    private var lastSuccessfulOperationTime: Long = System.currentTimeMillis()
+    private val WATCHDOG_INTERVAL_MS = 60000L  // Check connection health every 60s
+    
     // Device Information Service data (read from BLE 0x180A service or parsed from status)
     private var bleManufacturerName: String? = null
     private var bleModelNumber: String? = null    // Device type (TT field, e.g., "EasyTouch")
@@ -247,26 +257,77 @@ class EasyTouchGattCallback(
         }
         mqttPublisher.logBleEvent("STATE_CHANGE: $stateStr (status=$status)")
         
-        when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> {
-                Log.i(TAG, "Connected to ${device.address}")
-                this.gatt = gatt
-                publishAvailability(true)
-                publishDiagnosticsDiscovery()
-                publishDiagnosticsState(isConnected = true)
-                
-                // Discover services after brief delay
-                mainHandler.postDelayed({
-                    gatt.discoverServices()
-                }, EasyTouchConstants.SERVICE_DISCOVERY_DELAY_MS)
+        when (status) {
+            BluetoothGatt.GATT_SUCCESS -> {
+                when (newState) {
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        Log.i(TAG, "Connected to ${device.address}")
+                        this.gatt = gatt
+                        // Reset retry counter on successful connection
+                        gatt133RetryCount = 0
+                        lastSuccessfulOperationTime = System.currentTimeMillis()
+                        publishAvailability(true)
+                        publishDiagnosticsDiscovery()
+                        publishDiagnosticsState(isConnected = true)
+                        
+                        // Discover services after brief delay
+                        mainHandler.postDelayed({
+                            gatt.discoverServices()
+                        }, EasyTouchConstants.SERVICE_DISCOVERY_DELAY_MS)
+                    }
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        Log.w(TAG, "Disconnected from ${device.address}")
+                        cleanup()
+                        onDisconnect(device, status)
+                    }
+                }
             }
-            BluetoothProfile.STATE_DISCONNECTED -> {
-                Log.w(TAG, "Disconnected from ${device.address}")
-                stopStatusPolling()  // Stop polling on disconnect
-                publishAvailability(false)
-                publishDiagnosticsState(isConnected = false)
-                isAuthenticated = false
-                discoveryPublished = false
+            133 -> {
+                gatt133RetryCount++
+                Log.e(TAG, "⚠️ GATT_ERROR (133) - Connection failed (attempt $gatt133RetryCount/$MAX_GATT_133_RETRIES)")
+                cleanup()
+                
+                if (gatt133RetryCount < MAX_GATT_133_RETRIES) {
+                    Log.i(TAG, "🔄 Retrying connection in ${GATT_133_RETRY_DELAY_MS}ms...")
+                    mainHandler.postDelayed({
+                        try {
+                            Log.i(TAG, "🔄 Attempting reconnection (retry $gatt133RetryCount)...")
+                            val newGatt = device.connectGatt(
+                                context,
+                                false,
+                                this,
+                                BluetoothDevice.TRANSPORT_LE
+                            )
+                            if (newGatt != null) {
+                                this.gatt = newGatt
+                                Log.i(TAG, "🔄 Reconnection initiated")
+                            } else {
+                                Log.e(TAG, "❌ Failed to initiate reconnection")
+                                onDisconnect(device, status)
+                            }
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "❌ Permission denied for reconnection", e)
+                            onDisconnect(device, status)
+                        }
+                    }, GATT_133_RETRY_DELAY_MS)
+                } else {
+                    Log.e(TAG, "❌ Max retries ($MAX_GATT_133_RETRIES) reached - stopping reconnection attempts")
+                    onDisconnect(device, status)
+                }
+            }
+            8 -> {
+                Log.e(TAG, "⏱️ Connection timeout (status 8)")
+                cleanup()
+                onDisconnect(device, status)
+            }
+            19 -> {
+                Log.e(TAG, "🚫 Peer terminated connection (status 19)")
+                cleanup()
+                onDisconnect(device, status)
+            }
+            else -> {
+                Log.e(TAG, "❌ Connection failed with status: $status")
+                cleanup()
                 onDisconnect(device, status)
             }
         }
@@ -279,6 +340,7 @@ class EasyTouchGattCallback(
             return
         }
         
+        lastSuccessfulOperationTime = System.currentTimeMillis()
         Log.i(TAG, "Services discovered")
         
         // Try to read Device Information Service (0x180A) for model/firmware info
@@ -406,6 +468,15 @@ class EasyTouchGattCallback(
         mainHandler.removeCallbacks(statusPollRunnable)
     }
     
+    private fun cleanup() {
+        stopStatusPolling()
+        stopWatchdog()
+        publishAvailability(false)
+        publishDiagnosticsState(isConnected = false)
+        isAuthenticated = false
+        discoveryPublished = false
+    }
+    
     /**
      * Temporarily suppress status updates to prevent UI bounce-back.
      * Called after sending commands to give the thermostat time to process.
@@ -454,6 +525,8 @@ class EasyTouchGattCallback(
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.i(TAG, "Password written successfully")
                     isAuthenticated = true
+                    lastSuccessfulOperationTime = System.currentTimeMillis()
+                    startWatchdog()
                     Log.i(TAG, "Fully authenticated! Requesting device config...")
                     // Request config first to get available modes, then start polling
                     requestConfig(zone = 0)
@@ -996,14 +1069,17 @@ class EasyTouchGattCallback(
         }
         
         // Fan mode - use appropriate fan speed based on current mode
+        // Note: Fan mode setting persists even when system is off, so we report the actual fan setting
         val fanMode = when (mode) {
             "fan_only" -> fanValueToString(state.fanOnlySpeed, isFanOnly = true)
             "cool" -> fanValueToString(state.coolFanSpeed, isFanOnly = false)
             "heat" -> fanValueToString(state.electricFanSpeed, isFanOnly = false)  // or gasFanSpeed depending on unit
             "auto" -> fanValueToString(state.autoFanSpeed, isFanOnly = false)
-            else -> "off"
+            else -> fanValueToString(state.autoFanSpeed, isFanOnly = false)  // When off, use auto fan speed setting
         }
-        mqttPublisher.publishState("$zoneTopic/state/fan_mode", fanMode, true)
+        // Only publish fan_mode if it's a valid value (not "off")
+        val validFanMode = if (fanMode == "off") "auto" else fanMode
+        mqttPublisher.publishState("$zoneTopic/state/fan_mode", validFanMode, true)
         
         // Action (what's currently happening)
         val action = getAction(state)
@@ -1475,6 +1551,50 @@ class EasyTouchGattCallback(
         )
         
         DebugLog.d(TAG, "Published diagnostic state: authenticated=$isPaired, connected=$isConnected, dataHealthy=$dataHealthy, model=$deviceModel, serial=$bleSerialNumber, firmware=$bleFirmwareRevision")
+    }
+    
+    /**
+     * Start connection watchdog - detects zombie states and stale connections
+     */
+    private fun startWatchdog() {
+        stopWatchdog()
+        
+        watchdogRunnable = object : Runnable {
+            override fun run() {
+                val currentGatt = gatt
+                val timeSinceLastOp = System.currentTimeMillis() - lastSuccessfulOperationTime
+                
+                Log.d(TAG, "🐕 Watchdog check: isConnected=${currentGatt != null}, isAuth=$isAuthenticated, timeSince=${timeSinceLastOp}ms")
+                
+                // Detect zombie state: should be connected but isn't
+                if (currentGatt != null && !isAuthenticated) {
+                    Log.e(TAG, "🐕 ZOMBIE STATE DETECTED: GATT exists but isAuthenticated=false")
+                    Log.e(TAG, "🐕 Forcing cleanup and reconnection...")
+                    cleanup()
+                    onDisconnect(device, -1)
+                }
+                // Detect stale connection: connected but no operations for 5 minutes
+                else if (isAuthenticated && isPollingActive && timeSinceLastOp > 300000) {
+                    Log.e(TAG, "🐕 STALE CONNECTION DETECTED: No operations for ${timeSinceLastOp/1000}s")
+                    Log.e(TAG, "🐕 Forcing reconnection...")
+                    cleanup()
+                    onDisconnect(device, -1)
+                }
+                
+                mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            }
+        }
+        
+        mainHandler.postDelayed(watchdogRunnable!!, WATCHDOG_INTERVAL_MS)
+        Log.i(TAG, "🐕 Connection watchdog started (every ${WATCHDOG_INTERVAL_MS/1000}s)")
+    }
+    
+    private fun stopWatchdog() {
+        watchdogRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            watchdogRunnable = null
+            Log.d(TAG, "🐕 Watchdog stopped")
+        }
     }
 }
 

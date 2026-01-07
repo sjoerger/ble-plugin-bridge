@@ -290,6 +290,76 @@ class OneControlGattCallback(
     private val deviceMetadata = mutableMapOf<Int, DeviceMetadata>()
     private var metadataRequested = false
     
+    init {
+        // Load cached metadata immediately so friendly names are available from first state update
+        loadMetadataFromCache()
+    }
+    
+    /**
+     * Load device metadata from persistent cache.
+     * This allows friendly names to be available immediately without waiting for metadata request.
+     */
+    private fun loadMetadataFromCache() {
+        try {
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            val cacheKey = "metadata_${device.address.replace(":", "")}"
+            val cached = prefs.getString(cacheKey, null)
+            
+            if (cached != null) {
+                val jsonArray = JSONArray(cached)
+                var loadedCount = 0
+                
+                for (i in 0 until jsonArray.length()) {
+                    val json = jsonArray.getJSONObject(i)
+                    val deviceAddr = json.getInt("deviceAddr")
+                    deviceMetadata[deviceAddr] = DeviceMetadata(
+                        deviceTableId = json.getInt("deviceTableId"),
+                        deviceId = json.getInt("deviceId"),
+                        functionName = json.getInt("functionName"),
+                        functionInstance = json.getInt("functionInstance"),
+                        friendlyName = json.getString("friendlyName")
+                    )
+                    loadedCount++
+                }
+                
+                Log.i(TAG, "💾 Loaded $loadedCount cached metadata entries for ${device.address}")
+            } else {
+                Log.d(TAG, "💾 No cached metadata found for ${device.address}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "💾 Error loading cached metadata: ${e.message}", e)
+        }
+    }
+    
+    /**
+     * Save device metadata to persistent cache.
+     * Cache survives app restarts and reconnections.
+     */
+    private fun saveMetadataToCache() {
+        try {
+            val jsonArray = JSONArray()
+            
+            deviceMetadata.forEach { (deviceAddr, metadata) ->
+                val json = JSONObject()
+                json.put("deviceAddr", deviceAddr)
+                json.put("deviceTableId", metadata.deviceTableId)
+                json.put("deviceId", metadata.deviceId)
+                json.put("functionName", metadata.functionName)
+                json.put("functionInstance", metadata.functionInstance)
+                json.put("friendlyName", metadata.friendlyName)
+                jsonArray.put(json)
+            }
+            
+            val prefs = context.getSharedPreferences("onecontrol_cache", Context.MODE_PRIVATE)
+            val cacheKey = "metadata_${device.address.replace(":", "")}"
+            prefs.edit().putString(cacheKey, jsonArray.toString()).apply()
+            
+            Log.i(TAG, "💾 Saved ${deviceMetadata.size} metadata entries to cache for ${device.address}")
+        } catch (e: Exception) {
+            Log.e(TAG, "💾 Error saving metadata to cache: ${e.message}", e)
+        }
+    }
+    
     /**
      * Get friendly name for a device, or fallback to hex ID
      */
@@ -1818,6 +1888,9 @@ class OneControlGattCallback(
         }
         
         Log.i(TAG, "📋 Parsed $index entries, ${deviceMetadata.size} total")
+        
+        // Save metadata to persistent cache
+        saveMetadataToCache()
     }
     
     /**
