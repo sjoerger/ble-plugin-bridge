@@ -51,6 +51,18 @@
 ### Recent Critical Changes
 
 **v2.4.9 (January 2026):**
+- **EasyTouch Watchdog Fix:** Fixed false "stale connection" detection causing disconnects every 5 minutes
+  - Root cause: `lastSuccessfulOperationTime` not updated during status polling
+  - Status responses now update timestamp to prevent watchdog false positives
+  - Watchdog only triggers on genuine zombie states or actual stale connections (5+ min with no responses)
+- **EasyTouch Setpoint Fixes:** Resolved temperature setpoint changes reverting in Home Assistant
+  - Implemented optimistic state updates for instant UI feedback
+  - Extended suppression window from 2s to 8s (skips 2 polling cycles instead of 1)
+  - Added verification status read 4s after command to confirm change applied
+  - Fixed float parsing: Home Assistant sends "64.0", code now handles floats via `toFloatOrNull()?.toInt()`
+- **Watchdog Infinite Loop Fix:** Prevented zombie state cleanup from rescheduling itself
+  - Added `shouldContinue` flag to break loop when cleanup() is triggered
+  - Watchdog now stops cleanly after detecting and resolving zombie states
 - Connection robustness improvements: Added GATT 133 retry logic to GoPower and EasyTouch
 - Per-plugin watchdog: Added connection health monitoring and zombie state detection
 - Persistent metadata cache: OneControl friendly names survive app restarts

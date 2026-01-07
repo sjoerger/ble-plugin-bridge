@@ -765,6 +765,9 @@ class EasyTouchGattCallback(
                 val state = parseMultiZoneStatus(json)
                 currentState = state
                 
+                // Update last operation time to prevent watchdog false positives
+                lastSuccessfulOperationTime = System.currentTimeMillis()
+                
                 // Skip publishing if status updates are suppressed (command in progress)
                 if (isStatusSuppressed) {
                     DebugLog.d(TAG, "Status update suppressed (command in progress)")
@@ -777,6 +780,9 @@ class EasyTouchGattCallback(
             type == "Status" -> {
                 val state = parseMultiZoneStatus(json)
                 currentState = state
+                
+                // Update last operation time to prevent watchdog false positives
+                lastSuccessfulOperationTime = System.currentTimeMillis()
                 
                 // Skip publishing if status updates are suppressed (command in progress)
                 if (!isStatusSuppressed) {
@@ -1275,20 +1281,24 @@ class EasyTouchGattCallback(
         Log.i(TAG, "📤 Sending mode command: zone=$zone, power=$powerValue, mode=$modeValue (HA mode: $payload)")
         writeJsonCommand(command)
         
-        // Suppress status updates for 2 seconds to let thermostat process command
+        // Suppress status updates for 8 seconds to let thermostat process command
         // (prevents UI bounce-back from stale status)
-        suppressStatusUpdates(2000)
+        suppressStatusUpdates(8000)
         
         return Result.success(Unit)
     }
     
     private fun handleTemperatureCommand(zone: Int, payload: String): Result<Unit> {
-        val temp = payload.toIntOrNull()
+        val temp = payload.toFloatOrNull()?.toInt()
             ?: return Result.failure(Exception("Invalid temperature: $payload"))
         
         val state = currentState?.zones?.get(zone)
             ?: return Result.failure(Exception("No current state for zone $zone"))
         val mode = EasyTouchConstants.DEVICE_TO_HA_MODE[state.modeNum] ?: "off"
+        
+        // Optimistic state update for immediate HA feedback
+        val zoneTopic = "$baseTopic/zone_$zone"
+        mqttPublisher.publishState("$zoneTopic/state/target_temperature", temp.toString(), true)
         
         val changes = JSONObject().apply {
             put("zone", zone)
@@ -1306,15 +1316,26 @@ class EasyTouchGattCallback(
             }
             Log.i(TAG, "📤 Sending temperature command: zone=$zone, temp=$temp for mode=$mode")
             writeJsonCommand(command)
-            suppressStatusUpdates(2000)
+            
+            // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
+            suppressStatusUpdates(8000)
+            
+            // Verify after device has time to process
+            mainHandler.postDelayed({
+                requestStatus(zone)
+            }, 4000)
         }
         
         return Result.success(Unit)
     }
     
     private fun handleTemperatureHighCommand(zone: Int, payload: String): Result<Unit> {
-        val temp = payload.toIntOrNull()
+        val temp = payload.toFloatOrNull()?.toInt()
             ?: return Result.failure(Exception("Invalid temperature: $payload"))
+        
+        // Optimistic state update for immediate HA feedback
+        val zoneTopic = "$baseTopic/zone_$zone"
+        mqttPublisher.publishState("$zoneTopic/state/target_temperature_high", temp.toString(), true)
         
         val command = JSONObject().apply {
             put("Type", "Change")
@@ -1326,13 +1347,25 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "📤 Sending temp high command: zone=$zone, autoCool_sp=$temp")
         writeJsonCommand(command)
-        suppressStatusUpdates(2000)
+        
+        // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
+        suppressStatusUpdates(8000)
+        
+        // Verify after device has time to process
+        mainHandler.postDelayed({
+            requestStatus(zone)
+        }, 4000)
+        
         return Result.success(Unit)
     }
     
     private fun handleTemperatureLowCommand(zone: Int, payload: String): Result<Unit> {
-        val temp = payload.toIntOrNull()
+        val temp = payload.toFloatOrNull()?.toInt()
             ?: return Result.failure(Exception("Invalid temperature: $payload"))
+        
+        // Optimistic state update for immediate HA feedback
+        val zoneTopic = "$baseTopic/zone_$zone"
+        mqttPublisher.publishState("$zoneTopic/state/target_temperature_low", temp.toString(), true)
         
         val command = JSONObject().apply {
             put("Type", "Change")
@@ -1344,7 +1377,15 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "📤 Sending temp low command: zone=$zone, autoHeat_sp=$temp")
         writeJsonCommand(command)
-        suppressStatusUpdates(2000)
+        
+        // Suppress polling for 8 seconds to skip 2 polling cycles (prevents bounce-back)
+        suppressStatusUpdates(8000)
+        
+        // Verify after device has time to process
+        mainHandler.postDelayed({
+            requestStatus(zone)
+        }, 4000)
+        
         return Result.success(Unit)
     }
     
@@ -1374,7 +1415,7 @@ class EasyTouchGattCallback(
         
         Log.i(TAG, "📤 Sending fan mode command: zone=$zone, fan=$fanValue for mode=$mode")
         writeJsonCommand(command)
-        suppressStatusUpdates(2000)
+        suppressStatusUpdates(8000)
         return Result.success(Unit)
     }
     
@@ -1566,12 +1607,15 @@ class EasyTouchGattCallback(
                 
                 Log.d(TAG, "🐕 Watchdog check: isConnected=${currentGatt != null}, isAuth=$isAuthenticated, timeSince=${timeSinceLastOp}ms")
                 
+                var shouldContinue = true
+                
                 // Detect zombie state: should be connected but isn't
                 if (currentGatt != null && !isAuthenticated) {
                     Log.e(TAG, "🐕 ZOMBIE STATE DETECTED: GATT exists but isAuthenticated=false")
                     Log.e(TAG, "🐕 Forcing cleanup and reconnection...")
                     cleanup()
                     onDisconnect(device, -1)
+                    shouldContinue = false  // Don't reschedule - cleanup stopped the watchdog
                 }
                 // Detect stale connection: connected but no operations for 5 minutes
                 else if (isAuthenticated && isPollingActive && timeSinceLastOp > 300000) {
@@ -1579,9 +1623,13 @@ class EasyTouchGattCallback(
                     Log.e(TAG, "🐕 Forcing reconnection...")
                     cleanup()
                     onDisconnect(device, -1)
+                    shouldContinue = false  // Don't reschedule - cleanup stopped the watchdog
                 }
                 
-                mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+                // Only reschedule if we didn't trigger cleanup
+                if (shouldContinue) {
+                    mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+                }
             }
         }
         
