@@ -393,6 +393,12 @@ class OneControlGattCallback(
     private var lastSuccessfulOperationTime: Long = System.currentTimeMillis()
     
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        val stateStr = when(newState) {
+            BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+            BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+            else -> "UNKNOWN($newState)"
+        }
+        mqttPublisher.logBleEvent("STATE_CHANGE: $stateStr (status=$status)")
         Log.i(TAG, "🔌 Connection state changed: status=$status, newState=$newState, callback=${this.hashCode()}")
         
         when (status) {
@@ -477,16 +483,39 @@ class OneControlGattCallback(
             Log.w(TAG, "⚠️ MTU change failed: status=$status")
         }
         
-        // After MTU exchange, start challenge-response authentication
-        // From AUTHENTICATION_ALGORITHM.md: Read challenge, calculate KEY, write KEY
-        Log.i(TAG, "🔑 Starting authentication sequence after MTU exchange...")
+        // Mark MTU as ready and check if we can start authentication
+        mtuReady = true
+        checkAndStartAuthentication(gatt)
+    }
+    
+    /**
+     * Check if both services discovered and MTU ready, then start authentication.
+     * This prevents race condition where MTU callback fires before characteristics are cached.
+     */
+    private fun checkAndStartAuthentication(gatt: BluetoothGatt) {
+        if (!servicesDiscovered) {
+            Log.d(TAG, "⏳ Waiting for services to be discovered before auth...")
+            return
+        }
+        if (!mtuReady) {
+            Log.d(TAG, "⏳ Waiting for MTU exchange before auth...")
+            return
+        }
+        
+        // Both ready - start authentication
+        Log.i(TAG, "🔑 Starting authentication sequence (services ready, MTU ready)...")
         startAuthentication(gatt)
     }
     
     // Track if notifications have been enabled to avoid duplicates
     private var notificationsEnableStarted = false
     
+    // Track readiness for authentication (both must be true)
+    private var servicesDiscovered = false
+    private var mtuReady = false
+    
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        mqttPublisher.logBleEvent("SERVICES_DISCOVERED: status=$status, count=${gatt.services.size}")
         Log.i(TAG, "📋 Services discovered: status=$status, gatt=${gatt.hashCode()}, currentGatt=${currentGatt?.hashCode()}")
         
         if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -524,9 +553,15 @@ class OneControlGattCallback(
             return
         }
         
-        // Request MTU - the onMtuChanged callback will then write KEY and enable notifications
+        // Mark services as discovered
+        servicesDiscovered = true
+        
+        // Request MTU - when both MTU ready and services discovered, auth will start
         Log.i(TAG, "📐 Requesting MTU size $BLE_MTU_SIZE...")
         gatt.requestMtu(BLE_MTU_SIZE)
+        
+        // Also check if MTU already completed (race condition where MTU fires first)
+        checkAndStartAuthentication(gatt)
     }
     
     /**
@@ -736,6 +771,8 @@ class OneControlGattCallback(
     override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
         val uuid = characteristic.uuid
         val data = characteristic.value
+        val hex = data?.joinToString(" ") { "%02X".format(it) } ?: "null"
+        mqttPublisher.logBleEvent("READ $uuid: $hex (status=$status)")
         
         Log.i(TAG, "📖 onCharacteristicRead: $uuid, status=$status, ${data?.size ?: 0} bytes")
         
@@ -751,7 +788,6 @@ class OneControlGattCallback(
             return
         }
         
-        val hex = data.joinToString(" ") { "%02X".format(it) }
         Log.i(TAG, "📖 Read data: $hex")
         
         when (uuid) {
@@ -890,6 +926,9 @@ class OneControlGattCallback(
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray
     ) {
+        val uuid = characteristic.uuid.toString().lowercase()
+        val hex = value.joinToString(" ") { "%02X".format(it) }
+        mqttPublisher.logBleEvent("NOTIFY $uuid: $hex")
         Log.i(TAG, "📨📨📨 onCharacteristicChanged (API33+): ${characteristic.uuid}, ${value.size} bytes, callback=${this.hashCode()}")
         handleCharacteristicNotification(characteristic.uuid, value)
     }
@@ -901,6 +940,11 @@ class OneControlGattCallback(
         characteristic: BluetoothGattCharacteristic
     ) {
         val data = characteristic.value
+        if (data != null) {
+            val uuid = characteristic.uuid.toString().lowercase()
+            val hex = data.joinToString(" ") { "%02X".format(it) }
+            mqttPublisher.logBleEvent("NOTIFY $uuid: $hex")
+        }
         Log.i(TAG, "📨📨📨 onCharacteristicChanged (legacy): ${characteristic.uuid}, ${data?.size ?: 0} bytes, callback=${this.hashCode()}")
         if (data != null) {
             handleCharacteristicNotification(characteristic.uuid, data)
@@ -918,6 +962,8 @@ class OneControlGattCallback(
         }
         
         val hex = data.joinToString(" ") { "%02X".format(it) }
+        // Log to trace file (observation only - doesn't affect comms)
+        mqttPublisher.logBleEvent("NOTIFY ${uuid.toString().lowercase()}: $hex")
         Log.i(TAG, "📨 Notification from $uuid: ${data.size} bytes")
         Log.d(TAG, "📨 Data: $hex")
         
@@ -955,6 +1001,8 @@ class OneControlGattCallback(
     
     override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
         val uuid = characteristic.uuid.toString().lowercase()
+        val hex = characteristic.value?.joinToString(" ") { "%02X".format(it) } ?: "null"
+        mqttPublisher.logBleEvent("WRITE $uuid: $hex (status=$status)")
         Log.i(TAG, "📝 onCharacteristicWrite: $uuid, status=$status")
         
         if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -2445,6 +2493,8 @@ class OneControlGattCallback(
         mqttPublisher.updateBleStatus(connected = false, paired = false)
         publishDiagnosticsState()  // Update diagnostic sensors on disconnect
         notificationsEnableStarted = false
+        servicesDiscovered = false
+        mtuReady = false
         seedValue = null
         currentGatt = null
         gatewayInfoReceived = false

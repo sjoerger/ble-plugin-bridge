@@ -204,6 +204,10 @@ class BaseBleService : Service() {
                 }
             }
         }
+        
+        override fun logBleEvent(message: String) {
+            appendDebugLog(message)
+        }
     }
     
     /**
@@ -2168,6 +2172,7 @@ class BaseBleService : Service() {
      * Returns the trace file if it exists, null otherwise.
      */
     fun stopBleTrace(reason: String = "stopped"): java.io.File? {
+        _traceActive.value = false  // Update UI state first (fixes stuck button)
         if (!traceEnabled) return traceFile
         logTrace("TRACE STOP reason=$reason")
         traceTimeout?.let { handler.removeCallbacks(it) }
@@ -2178,7 +2183,6 @@ class BaseBleService : Service() {
             traceWriter?.close()
         } catch (_: Exception) {}
         traceWriter = null
-        _traceActive.value = false
         if (traceFile != null) {
             _traceFilePath.value = traceFile!!.absolutePath
             Log.i(TAG, "🔍 BLE trace stopped: ${traceFile!!.absolutePath}")

@@ -103,4 +103,12 @@ interface MqttPublisher {
      * @param callback Called when a message arrives on the topic
      */
     fun subscribeToCommands(topicPattern: String, callback: (topic: String, payload: String) -> Unit)
+    
+    /**
+     * Log a BLE event for debug log and trace capture.
+     * Plugins call this to report BLE operations (reads, writes, notifications) for debugging.
+     * 
+     * @param message Event description (e.g., "WRITE uuid: hex_data (status=0)")
+     */
+    fun logBleEvent(message: String)
 }
