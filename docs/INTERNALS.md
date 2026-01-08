@@ -1462,17 +1462,62 @@ companion object {
 
 **Reference:** Official app `U_Thermostat.java` line 663: `mStatusHandler.postDelayed(this.statusRunnable, 4000)`
 
+### Multi-Zone Support
+
+EasyTouch thermostats can control multiple independent HVAC zones (common in larger RVs with separate front/rear A/C units).
+
+**Zone Detection:**
+The `Z_sts` response object contains keys for each available zone:
+```json
+{
+  "Type": "Response",
+  "RT": "Status",
+  "Z_sts": {
+    "0": [72, 78, 72, ...],  // Zone 0 status array
+    "1": [70, 76, 70, ...]   // Zone 1 status array  
+  }
+}
+```
+
+The plugin parses all `Z_sts` keys to dynamically discover zones and creates a separate Climate entity for each.
+
+**Zone-Specific Topics:**
+Each zone has its own topic tree:
+```
+easytouch/{MAC}/zone_0/state/mode
+easytouch/{MAC}/zone_0/state/current_temperature
+easytouch/{MAC}/zone_0/command/temperature
+...
+easytouch/{MAC}/zone_1/state/mode
+easytouch/{MAC}/zone_1/state/current_temperature
+...
+```
+
+**Zone-Specific Commands:**
+All commands include a `zone` field to target the correct zone:
+```json
+{
+  "Type": "Change",
+  "Changes": {
+    "zone": 1,
+    "cool_sp": 74
+  }
+}
+```
+
 ### Capability Discovery (Get Config)
 
-After authentication, the plugin requests device configuration to discover supported modes and setpoint limits. This prevents showing unsupported modes (e.g., "dry" on devices without dehumidification).
+After authentication, the plugin requests device configuration for each zone (0-3) to discover supported modes and setpoint limits. This prevents showing unsupported modes (e.g., "dry" on devices without dehumidification).
 
 **Connection Sequence:**
 ```
 1. Connect → Authenticate
-2. Request Config for zones 0-3
+2. Request Config for zone 0
 3. Parse MAV bitmask and setpoint limits
-4. Start status polling
-5. Publish discovery (with actual device capabilities)
+4. Store zone configuration
+5. Request Config for zones 1-3 (with 300ms delays)
+6. After all zones configured → Start status polling
+7. Publish discovery (with actual device capabilities per zone)
 ```
 
 **Get Config Command:**
@@ -1497,6 +1542,20 @@ After authentication, the plugin requests device configuration to discover suppo
 
 **CRITICAL:** Config data is nested inside `CFG` object, not at root level.
 
+**Zone Configuration Storage:**
+```kotlin
+data class ZoneConfiguration(
+    val zone: Int,
+    val availableModesBitmask: Int,  // MAV field
+    val minCoolSetpoint: Int,        // SPL[0]
+    val maxCoolSetpoint: Int,        // SPL[1]
+    val minHeatSetpoint: Int,        // SPL[2]
+    val maxHeatSetpoint: Int         // SPL[3]
+)
+
+private val zoneConfigs = mutableMapOf<Int, ZoneConfiguration>()
+```
+
 ### MAV (Mode AVailable) Bitmask
 
 The `MAV` field is a bitmask indicating which HVAC modes the device supports:
@@ -1515,17 +1574,30 @@ The `MAV` field is a bitmask indicating which HVAC modes the device supports:
 **Parsing:**
 ```kotlin
 private fun getModesFromBitmask(mav: Int): List<String> {
-    if (mav == 0) return defaultModes  // Fallback if no MAV
+    if (mav == 0) return EasyTouchConstants.SUPPORTED_HVAC_MODES  // Fallback if no MAV
     
     val modes = mutableListOf("off")  // Always include off
     for (bit in 0..15) {
         if ((mav and (1 shl bit)) != 0) {
-            DEVICE_TO_HA_MODE[bit]?.let { modes.add(it) }
+            EasyTouchConstants.DEVICE_TO_HA_MODE[bit]?.let { haMode ->
+                if (haMode != "off" && !modes.contains(haMode)) {
+                    modes.add(haMode)
+                }
+            }
         }
     }
     return modes
 }
 ```
+
+**MAV Bit Positions:**
+The MAV bitmask uses bit positions that correspond to device mode numbers:
+- Bit 0 = Mode 0 (off)
+- Bit 1 = Mode 1 (fan_only)
+- Bit 2 = Mode 2 (cool)
+- Bit 4 = Mode 4 (heat)
+- Bit 6 = Mode 6 (dry)
+- Bit 11 = Mode 11 (auto)
 
 ### SPL (Setpoint Limits) Array
 
@@ -1536,6 +1608,157 @@ The `SPL` array contains temperature limits: `[minCool, maxCool, minHeat, maxHea
 - Heat setpoint: 40-95°F
 
 These values are used in Home Assistant discovery for `min_temp` and `max_temp`.
+
+### Write Retry with Delays
+
+BLE write operations can fail on first attempt. The plugin implements retry logic with exponential backoff:
+
+```kotlin
+private fun writeJsonCommand(json: JSONObject, retryCount: Int = 0) {
+    val delayMs = if (retryCount == 0) 100L else (200L * (retryCount + 1))
+    
+    mainHandler.postDelayed({
+        char.value = json.toString().toByteArray(StandardCharsets.UTF_8)
+        val success = gatt?.writeCharacteristic(char) ?: false
+        
+        if (!success && retryCount < 2) {
+            // Retry up to 2 more times with increasing delays
+            writeJsonCommand(json, retryCount + 1)
+        }
+    }, delayMs)
+}
+```
+
+**Retry Schedule:**
+- Attempt 1: 100ms delay
+- Attempt 2: 400ms delay (if first fails)
+- Attempt 3: 600ms delay (if second fails)
+
+This matches the behavior of the HACS integration and significantly improves write reliability.
+
+### Connection Watchdog (v2.4.9+)
+
+The plugin implements a 60-second connection watchdog to detect and recover from zombie states and stale connections.
+
+**Watchdog Checks:**
+- **Zombie State:** GATT exists but authentication never completed (5+ minutes after connection)
+- **Stale Connection:** No status responses received for 5+ minutes (actual hardware issue)
+
+**Status Timestamp Updates:**
+The `lastSuccessfulOperationTime` is updated on:
+1. Successful authentication
+2. Every status response received (every 4 seconds during polling)
+
+This prevents false positives where the watchdog would incorrectly detect a healthy connection as stale.
+
+**Watchdog Implementation:**
+```kotlin
+private val watchdogRunnable = object : Runnable {
+    private var shouldContinue = true
+    
+    override fun run() {
+        if (!shouldContinue) return
+        
+        val now = System.currentTimeMillis()
+        val timeSinceLastOp = now - lastSuccessfulOperationTime
+        
+        // Check for zombie state (connected but never authenticated)
+        if (gatt != null && !isAuthenticated && timeSinceLastOp > 300_000) {
+            Log.w(TAG, "Zombie state detected - cleaning up")
+            shouldContinue = false
+            cleanup()
+            onDisconnect(device, -1)
+            return
+        }
+        
+        // Check for stale connection (authenticated but no recent status)
+        if (isAuthenticated && timeSinceLastOp > 300_000) {
+            Log.w(TAG, "Stale connection detected - reconnecting")
+            shouldContinue = false
+            cleanup()
+            onDisconnect(device, -1)
+            return
+        }
+        
+        // Reschedule if still healthy
+        if (shouldContinue) {
+            mainHandler.postDelayed(this, 60_000)
+        }
+    }
+}
+```
+
+The `shouldContinue` flag prevents infinite loops when cleanup is triggered.
+
+### Optimistic State Updates (v2.4.9+)
+
+When a user changes a setpoint in Home Assistant, the plugin immediately publishes the new value to MQTT before sending the command to the device. This provides instant UI feedback and prevents the "bounce-back" issue where stale status data overwrites the command.
+
+**Command Flow:**
+```
+1. User changes setpoint to 72°F in HA
+2. Plugin receives command
+3. Plugin immediately publishes 72°F to state topic (optimistic update)
+4. HA UI updates instantly to 72°F
+5. Plugin sends command to thermostat
+6. Status polling suppressed for 8 seconds (skip 2 polling cycles)
+7. After 4 seconds, plugin requests verification status
+8. Verification confirms 72°F applied
+```
+
+**Optimistic Update Example:**
+```kotlin
+private fun handleTemperatureCommand(zone: Int, payload: String): Result<Unit> {
+    val temp = payload.toFloatOrNull()?.toInt()  // Handle "64.0" from HA
+        ?: return Result.failure(Exception("Invalid temperature: $payload"))
+    
+    // Optimistic state update for immediate HA feedback
+    val zoneTopic = "$baseTopic/zone_$zone"
+    mqttPublisher.publishState("$zoneTopic/state/target_temperature", temp.toString(), true)
+    
+    // Send command to device
+    val command = JSONObject().apply {
+        put("Type", "Change")
+        put("Changes", JSONObject().apply {
+            put("zone", zone)
+            put("cool_sp", temp)  // or heat_sp, based on current mode
+        })
+    }
+    writeJsonCommand(command)
+    
+    // Suppress polling for 8 seconds to skip 2 polling cycles
+    suppressStatusUpdates(8000)
+    
+    // Verify after device has time to process
+    mainHandler.postDelayed({
+        requestStatus(zone)
+    }, 4000)
+    
+    return Result.success(Unit)
+}
+```
+
+**Status Suppression:**
+```kotlin
+private var isStatusSuppressed = false
+
+private fun suppressStatusUpdates(durationMs: Long) {
+    isStatusSuppressed = true
+    mainHandler.postDelayed({
+        isStatusSuppressed = false
+    }, durationMs)
+}
+```
+
+During suppression, status responses are received but not published to MQTT, preventing race conditions.
+
+**Float Parsing Fix (v2.4.9):**
+Home Assistant sends temperature values as floats ("64.0") but the initial implementation expected integers. The fix uses `toFloatOrNull()?.toInt()` to handle float-to-int conversion:
+```kotlin
+// Before: val temp = payload.toIntOrNull()  // Fails on "64.0"
+// After:
+val temp = payload.toFloatOrNull()?.toInt()  // "64.0" → 64.0 → 64
+```
 
 ### Write Retry with Delays
 
@@ -1828,9 +2051,10 @@ override fun handleCommand(commandTopic: String, payload: String): Result<Unit> 
 
 ### Overview
 
-The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. Unlike OneControl and EasyTouch, the GoPower controller uses a **read-only** protocol - it broadcasts solar system status via BLE notifications but does not accept commands.
+The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30-SB) commonly found in RVs. The controller uses a **primarily read-only** protocol - it broadcasts solar system status via BLE notifications with limited command support (reboot only).
 
-**Location:** `app/src/main/java/com/blemqttbridge/plugins/gopower/`
+**Location:** `app/src/main/java/com/blemqttbridge/plugins/gopower/`  
+**Plugin Version:** 1.0.0
 
 ### Protocol Characteristics
 
@@ -1843,7 +2067,7 @@ The GoPower plugin connects to GoPower solar charge controllers (e.g., GP-PWM-30
 | Notify UUID | `0000fff1-0000-1000-8000-00805f9b34fb` |
 | Write UUID | `0000fff2-0000-1000-8000-00805f9b34fb` |
 | Data Format | Semicolon-delimited ASCII string (32 fields) |
-| Update Rate | ~1 second (polled via 0x20 command) |
+| Update Rate | 4 seconds (polled via 0x20 command) |
 | Encoding | ASCII text, fields separated by semicolons |
 
 ### Notification Data Format
@@ -1855,17 +2079,20 @@ Format: "f0;f1;f2;...;f31"
 Example: "00123;00456;00789;..."
 
 Key Field Mapping (0-indexed):
-Field 0:  PV Voltage (divide by 10 for volts)
-Field 2:  PV Current (divide by 100 for amps)  
-Field 7:  Battery Voltage (divide by 10 for volts)
-Field 12: Battery SOC percentage
-Field 14: Controller Temperature (°C)
-Field 15: Model ID (e.g., 20480 = GP-PWM-30-SB)
-Field 19: "Ah Today" - Daily energy in Ah (divide by 100)
-Field 26: Firmware version
+Field 0:  Solar/PV Panel Current (mA, divide by 1000 for amps)
+Field 2:  Battery Voltage (mV, divide by 1000 for volts)  
+Field 8:  Firmware Version (integer)
+Field 10: State of Charge (% integer)
+Field 11: Solar/PV Panel Voltage (mV, divide by 1000 for volts)
+Field 14: Serial Number (hex string - converted to decimal)
+Field 16: Temperature Celsius (signed, e.g., "+06" = 6°C)
+Field 17: Temperature Fahrenheit (signed, e.g., "+43" = 43°F)
+Field 19: Amp-hours Today (Ah × 100, divide by 100 for Ah - resets daily)
+Field 20: Amp-hours Yesterday (Ah × 100)
+Field 24: Amp-hours Last 7 Days (Ah × 100, cumulative weekly total)
 ```
 
-**Note:** The protocol uses semicolons, not commas. Fields are zero-padded 5-digit integers.
+**Note:** The protocol uses semicolons as delimiters. Fields are zero-padded 5-digit integers (except signed temperature fields with +/- prefix).
 
 ### Key Implementation Details
 
@@ -1874,81 +2101,149 @@ Field 26: Firmware version
 The plugin converts the controller's "Ah Today" value (Field 19) to Watt-hours using the current battery voltage:
 
 ```kotlin
-// GoPowerDevicePlugin.kt
-val ahToday = fields.getOrNull(GoPowerConstants.FIELD_AH_TODAY)
-    ?.toIntOrNull()?.let { it / 100.0 } ?: 0.0
-val batteryVoltage = fields.getOrNull(GoPowerConstants.FIELD_BATTERY_VOLTAGE)
-    ?.toIntOrNull()?.let { it / 10.0 } ?: 0.0
-val energyWh = ahToday * batteryVoltage
+// GoPowerDevicePlugin.kt (lines ~540-560)
+val ampHours = fields.getOrNull(GoPowerConstants.FIELD_AMP_HOURS_TODAY)
+    ?.trim()?.toIntOrNull() ?: 0
+val batteryVoltageMv = fields.getOrNull(GoPowerConstants.FIELD_BATTERY_VOLTAGE)
+    ?.trim()?.toIntOrNull() ?: 0
+val batteryVoltage = batteryVoltageMv / 1000.0
+
+// Convert Ah to Wh for energy dashboard: Wh = Ah × Voltage
+val energyWh = (ampHours * batteryVoltage).toInt()
 ```
 
-**Note:** This provides an approximate Wh value. True Wh would require integrating power over time, but Ah × V gives a reasonable estimate for display purposes.
-
-#### Model Number Detection
-
-The controller reports a model ID in Field 15. Known mappings:\n\n```kotlin\n// GoPowerConstants.kt\nconst val MODEL_GP_PWM_30_SB = 20480\n\n// GoPowerDevicePlugin.kt\nval modelId = fields.getOrNull(GoPowerConstants.FIELD_MODEL_ID)?.toIntOrNull() ?: 0\nval modelName = when (modelId) {\n    GoPowerConstants.MODEL_GP_PWM_30_SB -> \"GP-PWM-30-SB\"\n    else -> \"Unknown ($modelId)\"\n}\n```
+**Note:** Field 19 contains Ah × 100, so no division needed before multiplying by voltage. This provides an approximate daily Wh value. True Wh would require integrating power over time, but Ah × V gives a reasonable estimate for display purposes.
 
 #### Polling Protocol
 
-Unlike OneControl (event-driven) or EasyTouch (JSON polling), GoPower uses a simple byte command:
+Unlike OneControl (event-driven) or EasyTouch (JSON polling), GoPower uses a simple byte command (0x20 = ASCII space) sent every 4 seconds:
 
 ```kotlin
-private fun parseStatusNotification(data: ByteArray) {
-    val dataString = String(data, Charsets.UTF_8).trim()
-    val fields = dataString.split(";")  // Semicolon-delimited
+// GoPowerDevicePlugin.kt (lines ~440-480)
+private fun parseAndPublishStatus(response: String) {
+    val fields = response.split(GoPowerConstants.FIELD_DELIMITER)  // Semicolon-delimited
     
     // Validate field count (expect 32 fields)
-    if (fields.size < 27) {
-        Log.w(TAG, "Incomplete data: ${fields.size} fields")
+    if (fields.size < GoPowerConstants.EXPECTED_FIELD_COUNT) {
+        Log.w(TAG, "Incomplete response: ${fields.size} fields")
         return
     }
     
     try {
-        // Parse sensors with scaling
-        val pvVoltage = fields[FIELD_PV_VOLTAGE].toIntOrNull()?.let { it / 10.0 } ?: 0.0
-        val pvCurrent = fields[FIELD_PV_CURRENT].toIntOrNull()?.let { it / 100.0 } ?: 0.0
-        val batteryVoltage = fields[FIELD_BATTERY_VOLTAGE].toIntOrNull()?.let { it / 10.0 } ?: 0.0
-        val batteryPercent = fields[FIELD_BATTERY_SOC].toIntOrNull() ?: 0
-        val temperature = fields[FIELD_TEMPERATURE].toIntOrNull() ?: 0
-        val ahToday = fields[FIELD_AH_TODAY].toIntOrNull()?.let { it / 100.0 } ?: 0.0
+        // Parse fields with scaling (all values are integers)
+        val solarCurrentMa = fields.getOrNull(FIELD_SOLAR_CURRENT)?.trim()?.toIntOrNull() ?: 0
+        val batteryVoltageMv = fields.getOrNull(FIELD_BATTERY_VOLTAGE)?.trim()?.toIntOrNull() ?: 0
+        val soc = fields.getOrNull(FIELD_SOC)?.trim()?.toIntOrNull() ?: 0
+        val solarVoltageMv = fields.getOrNull(FIELD_SOLAR_VOLTAGE)?.trim()?.toIntOrNull() ?: 0
+        val tempC = parseSignedInt(fields.getOrNull(FIELD_TEMP_C)?.trim())  // "+06" → 6
+        val tempF = parseSignedInt(fields.getOrNull(FIELD_TEMP_F)?.trim())  // "+43" → 43
+        val ampHours = fields.getOrNull(FIELD_AMP_HOURS_TODAY)?.trim()?.toIntOrNull() ?: 0
         
-        // Calculate derived values
-        val pvPower = pvVoltage * pvCurrent
-        val energyWh = ahToday * batteryVoltage
+        // Convert to display units
+        val solarCurrent = solarCurrentMa / 1000.0
+        val batteryVoltage = batteryVoltageMv / 1000.0
+        val solarVoltage = solarVoltageMv / 1000.0
+        val solarPower = solarVoltage * solarCurrent
+        val energyWh = (ampHours * batteryVoltage).toInt()
         
         // Publish to MQTT
-        publishSensorData(pvVoltage, pvCurrent, pvPower, batteryVoltage, ...)
+        publishState(GoPowerState(solarVoltage, solarCurrent, solarPower, 
+                                  batteryVoltage, soc, tempC, tempF, energyWh, 0))
         
     } catch (e: Exception) {
-        Log.e(TAG, "Error parsing status", e)
+        Log.e(TAG, "Error parsing response", e)
+    }
+}
+
+private fun parseSignedInt(str: String?): Int {
+    if (str.isNullOrBlank()) return 0
+    return try {
+        str.replace("+", "").toInt()  // Remove + prefix for positive temps
+    } catch (e: NumberFormatException) {
+        0
     }
 }
 ```
 
 ### Home Assistant Entities
 
-The plugin publishes the following sensors to Home Assistant:
+The plugin publishes the following entities to Home Assistant:
 
-| Entity Type | Entity ID | Description | Unit | Device Class |
-|------------|-----------|-------------|------|--------------|
-| Sensor | `pv_voltage` | Solar panel voltage | V | voltage |
-| Sensor | `pv_current` | Solar panel current | A | current |
-| Sensor | `pv_power` | Solar input power | W | power |
-| Sensor | `battery_voltage` | Battery voltage | V | voltage |
-| Sensor | `battery_soc` | Battery state of charge | % | battery |
-| Sensor | `temperature` | Controller temperature | °C | temperature |
-| Sensor | `energy` | Daily energy (Ah × voltage) | Wh | energy |
-| Text Sensor | `model_number` | Device model number | - | diagnostic |
-| Text Sensor | `firmware_version` | Firmware version | - | diagnostic |
-| Binary Sensor | `connected` | BLE connection status | - | connectivity |
-| Binary Sensor | `data_healthy` | Data health status | - | connectivity |
-| Button | `reboot` | Reboot controller | - | restart |
+**Sensors:**
+| Entity ID | Name | Unit | Device Class | State Class | Description |
+|-----------|------|------|--------------|-------------|-------------|
+| `solar_voltage` | Solar Voltage | V | voltage | measurement | PV panel voltage |
+| `solar_current` | Solar Current | A | current | measurement | PV panel current |
+| `solar_power` | Solar Power | W | power | measurement | Calculated PV power (V × A) |
+| `battery_voltage` | Battery Voltage | V | voltage | measurement | Battery voltage |
+| `state_of_charge` | State of Charge | % | battery | measurement | Battery SOC percentage |
+| `temperature` | Temperature | °C | temperature | measurement | Controller temperature |
+| `energy` | Energy | Wh | energy | total_increasing | Daily energy production (Ah × voltage) |
+
+**Diagnostic Sensors:**
+| Entity ID | Name | Type | Entity Category | Description |
+|-----------|------|------|-----------------|-------------|
+| `model_number` | Model Number | Sensor (text) | diagnostic | Controller model |
+| `firmware_version` | Firmware Version | Sensor (text) | diagnostic | Firmware version |
+| `connected` | Connected | Binary Sensor | diagnostic | BLE connection status |
+| `data_healthy` | Data Healthy | Binary Sensor | diagnostic | Data health (connected + polling active) |
+
+**Buttons:**
+| Entity ID | Name | Entity Category | Description |
+|-----------|------|-----------------|-------------|
+| `reboot` | Reboot Controller | config | Soft reset (requires unlock sequence) |
+
+### Command Protocol
+
+The controller accepts limited commands. **All setting/control commands require an unlock sequence first:**
+
+```kotlin
+// GoPowerConstants.kt
+val UNLOCK_COMMAND: ByteArray = "&G++0900".toByteArray(Charsets.UTF_8)
+const val UNLOCK_DELAY_MS = 200L
+
+// Reboot command (soft reset - preserves settings)
+val REBOOT_COMMAND: ByteArray = "&LDD0100".toByteArray(Charsets.UTF_8)
+
+// Factory reset command (clears all settings)
+val FACTORY_RESET_COMMAND: ByteArray = "&LDD0000".toByteArray(Charsets.UTF_8)
+
+// Reset history command (clears Ah counters)
+val RESET_HISTORY_COMMAND: ByteArray = "&LDD0200".toByteArray(Charsets.UTF_8)
+```
+
+**Reboot Sequence (from handleCommand in GoPowerDevicePlugin.kt):**
+```kotlin
+private fun sendRebootCommand(): Result<Unit> {
+    val char = writeChar ?: return Result.failure(Exception("Write char not available"))
+    val g = gatt ?: return Result.failure(Exception("GATT not connected"))
+    
+    // Step 1: Send unlock command
+    char.value = GoPowerConstants.UNLOCK_COMMAND
+    if (!g.writeCharacteristic(char)) {
+        return Result.failure(Exception("Failed to write unlock command"))
+    }
+    
+    Log.i(TAG, "Unlock sent, waiting ${GoPowerConstants.UNLOCK_DELAY_MS}ms...")
+    
+    // Step 2: Send reboot command after delay
+    mainHandler.postDelayed({
+        writeChar?.value = GoPowerConstants.REBOOT_COMMAND
+        gatt?.writeCharacteristic(writeChar!!)
+        Log.i(TAG, "Reboot command sent")
+    }, GoPowerConstants.UNLOCK_DELAY_MS)
+    
+    return Result.success(Unit)
+}
+```
+
+**Note:** The plugin only implements the reboot command. Factory reset and history reset are defined in constants but not exposed to Home Assistant for safety reasons.
 
 ### Plugin Structure
 
 ```
 plugins/gopower/
-├── GoPowerDevicePlugin.kt          # Main plugin implementation
+├── GoPowerDevicePlugin.kt          # Main plugin implementation (946 lines)
 ├── protocol/
 │   └── GoPowerConstants.kt         # UUIDs, field indices, commands
 ```
@@ -1957,11 +2252,50 @@ plugins/gopower/
 
 Unlike OneControl, GoPower does not require pairing or authentication:
 
-1. Configure the controller MAC address in app settings
+1. Configure the controller MAC address in app settings (`controller_mac`)
 2. Enable the GoPower plugin
 3. Enable the BLE Service
 
-The plugin polls the controller at 1-second intervals.
+**Security Note:** The plugin only matches on the exact configured MAC address - no auto-discovery by device name. This prevents connecting to neighbors' GoPower controllers in RV parks.
+
+**Polling:** The plugin polls the controller at **4-second intervals** (defined in `GoPowerConstants.STATUS_POLL_INTERVAL_MS`). Each poll sends an ASCII space character (0x20) to the write characteristic.
+
+### Connection Watchdog
+
+GoPower implements a 60-second watchdog to detect and recover from connection issues:
+
+**Watchdog Checks:**
+- **Zombie State:** GATT exists but `isConnected=false` (incomplete connection)
+- **Stale Connection:** Connected and polling active but no operations for 5+ minutes
+
+**Implementation:**
+```kotlin
+private fun startWatchdog() {
+    watchdogRunnable = object : Runnable {
+        override fun run() {
+            val timeSinceLastOp = System.currentTimeMillis() - lastSuccessfulOperationTime
+            
+            // Detect zombie state
+            if (gatt != null && !isConnected) {
+                Log.e(TAG, "ZOMBIE STATE DETECTED")
+                cleanup()
+                onDisconnect(device, -1)
+            }
+            // Detect stale connection
+            else if (isConnected && isPollingActive && timeSinceLastOp > 300000) {
+                Log.e(TAG, "STALE CONNECTION DETECTED")
+                cleanup()
+                onDisconnect(device, -1)
+            }
+            
+            mainHandler.postDelayed(this, 60_000)
+        }
+    }
+    mainHandler.postDelayed(watchdogRunnable!!, 60_000)
+}
+```
+
+The `lastSuccessfulOperationTime` is updated on every status notification received.
 
 ### Key Differences from Other Plugins
 
@@ -1971,56 +2305,11 @@ The plugin polls the controller at 1-second intervals.
 | Authentication | TEA encryption | Password auth | None |
 | Commands | Full bidirectional | Climate control | Reboot only (via unlock) |
 | Notification Type | Event-driven | JSON status | Semicolon-delimited ASCII |
-| Data Format | COBS-encoded binary | JSON | Semicolon-delimited ASCII (32 fields) |
-| Heartbeat Needed | Yes (GetDevices) | No | Yes (0x20 poll command) |
+| Data Format | COBS-encoded binary | JSON | ASCII (32 semicolon-delimited fields) |
+| Heartbeat Needed | Yes (GetDevices) | Yes (0x20 poll command) | Yes (0x20 poll every 4s) |
+| Polling Interval | 8s (GetDevices) | 4s (JSON status) | 4s (ASCII status) |
 | Multi-device | Yes (gateway) | Yes (zones) | No (single controller) |
-
-### Reboot Command
-
-The GoPower controller supports a reboot command, but requires an unlock sequence first:
-
-```kotlin
-// GoPowerConstants.kt
-val UNLOCK_COMMAND = "&G++0900".toByteArray(Charsets.US_ASCII)
-val REBOOT_COMMAND = "&LDD0100".toByteArray(Charsets.US_ASCII)
-const val UNLOCK_DELAY_MS = 200L
-
-// GoPowerDevicePlugin.kt
-private fun sendRebootCommand() {
-    // Send unlock sequence first
-    writeCharacteristic?.let { char ->
-        char.value = GoPowerConstants.UNLOCK_COMMAND
-        currentGatt?.writeCharacteristic(char)
-    }
-    
-    // Wait for unlock to process, then send reboot
-    handler.postDelayed({
-        writeCharacteristic?.let { char ->
-            char.value = GoPowerConstants.REBOOT_COMMAND
-            currentGatt?.writeCharacteristic(char)
-        }
-    }, GoPowerConstants.UNLOCK_DELAY_MS)
-}
-```
-
-**Note:** The reboot command is exposed as a button entity in Home Assistant but may not actually reboot all controller models.
-
-### Diagnostic Sensors
-
-The GoPower plugin publishes diagnostic sensors for device identification:
-
-```kotlin
-// Published on connect and when data is first received
-publishDiagnosticSensor(
-    objectId = "model_number",
-    name = "Model Number",
-    value = modelName  // "GP-PWM-30-SB"
-)
-
-publishDiagnosticSensor(
-    objectId = "firmware_version",
-    name = "Firmware Version",
-    value = firmware  // e.g., "V1.5"
+| Connection Watchdog | 60s | 60s | 60s |
 )
 ```
 
