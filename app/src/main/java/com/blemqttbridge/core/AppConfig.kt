@@ -40,7 +40,8 @@ object AppConfig {
             "onecontrol_v2" -> runBlocking {
                 mapOf(
                     "gateway_mac" to settings.oneControlGatewayMac.first(),
-                    "gateway_pin" to settings.oneControlGatewayPin.first()
+                    "gateway_pin" to settings.oneControlGatewayPin.first(),
+                    "bluetooth_pin" to settings.oneControlBluetoothPin.first()
                 )
             }
             "easytouch" -> runBlocking {

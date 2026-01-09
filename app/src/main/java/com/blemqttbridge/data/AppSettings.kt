@@ -30,6 +30,7 @@ class AppSettings(private val context: Context) {
         val ONECONTROL_ENABLED = booleanPreferencesKey("onecontrol_enabled")
         val ONECONTROL_GATEWAY_MAC = stringPreferencesKey("onecontrol_gateway_mac")
         val ONECONTROL_GATEWAY_PIN = stringPreferencesKey("onecontrol_gateway_pin")
+        val ONECONTROL_BLUETOOTH_PIN = stringPreferencesKey("onecontrol_bluetooth_pin")
         
         // EasyTouch Plugin Settings
         val EASYTOUCH_ENABLED = booleanPreferencesKey("easytouch_enabled")
@@ -68,6 +69,7 @@ class AppSettings(private val context: Context) {
     val oneControlEnabled: Flow<Boolean> = context.dataStore.data.map { it[ONECONTROL_ENABLED] ?: false }
     val oneControlGatewayMac: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_MAC] ?: DEFAULT_GATEWAY_MAC }
     val oneControlGatewayPin: Flow<String> = context.dataStore.data.map { it[ONECONTROL_GATEWAY_PIN] ?: DEFAULT_GATEWAY_PIN }
+    val oneControlBluetoothPin: Flow<String> = context.dataStore.data.map { it[ONECONTROL_BLUETOOTH_PIN] ?: "" }
     
     // EasyTouch Plugin Flows
     val easyTouchEnabled: Flow<Boolean> = context.dataStore.data.map { it[EASYTOUCH_ENABLED] ?: false }
@@ -120,6 +122,10 @@ class AppSettings(private val context: Context) {
     
     suspend fun setOneControlGatewayPin(pin: String) {
         context.dataStore.edit { it[ONECONTROL_GATEWAY_PIN] = pin }
+    }
+    
+    suspend fun setOneControlBluetoothPin(pin: String) {
+        context.dataStore.edit { it[ONECONTROL_BLUETOOTH_PIN] = pin }
     }
     
     suspend fun setEasyTouchEnabled(enabled: Boolean) {

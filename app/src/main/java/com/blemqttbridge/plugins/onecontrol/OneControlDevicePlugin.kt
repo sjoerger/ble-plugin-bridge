@@ -17,6 +17,7 @@ import com.blemqttbridge.plugins.onecontrol.protocol.CobsDecoder
 import com.blemqttbridge.plugins.onecontrol.protocol.HomeAssistantMqttDiscovery
 import com.blemqttbridge.plugins.onecontrol.protocol.MyRvLinkCommandBuilder
 import com.blemqttbridge.plugins.onecontrol.protocol.FunctionNameMapper
+import com.blemqttbridge.plugins.onecontrol.protocol.AdvertisementParser
 import org.json.JSONObject
 import org.json.JSONArray
 import java.util.*
@@ -69,8 +70,12 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     // Configuration from settings
     private var gatewayMac: String = "24:DC:C3:ED:1E:0A"
-    private var gatewayPin: String = "090336"
+    private var gatewayPin: String = "090336"  // Protocol authentication PIN
+    private var bluetoothPin: String? = null    // BLE bonding PIN (for legacy gateways)
     private var gatewayCypher: Long = 0x8100080DL
+    
+    // Gateway capabilities (detected from advertisement)
+    private var gatewayCapabilities: AdvertisementParser.GatewayCapabilities? = null
     
     // Strong reference to callback to prevent GC
     private var gattCallback: BluetoothGattCallback? = null
@@ -89,10 +94,15 @@ class OneControlDevicePlugin : BleDevicePlugin {
     override fun initialize(context: Context, config: PluginConfig) {
         Log.i(TAG, "Initializing OneControl Device Plugin v$PLUGIN_VERSION")
         this.context = context
-        this.config = config
+        this.config = config  // Protocol authentication PIN
+        bluetoothPin = config.getString("bluetooth_pin", "")     // BLE bonding PIN (optional)
+        // gatewayCypher is hardcoded constant - same for all OneControl gateways
         
-        // Load configuration
-        gatewayMac = config.getString("gateway_mac", gatewayMac)
+        Log.i(TAG, "Configured for gateway: $gatewayMac")
+        Log.i(TAG, "  Protocol PIN: ${gatewayPin.take(2)}****")
+        if (!bluetoothPin.isNullOrBlank()) {
+            Log.i(TAG, "  Bluetooth PIN configured for legacy gateway pairing")
+        }
         gatewayPin = config.getString("gateway_pin", gatewayPin)
         // gatewayCypher is hardcoded constant - same for all OneControl gateways
         
@@ -107,8 +117,16 @@ class OneControlDevicePlugin : BleDevicePlugin {
         // This prevents connecting to neighbors' devices in RV parks.
         // No auto-discovery by device name or service UUID.
         
-        if (gatewayMac.isBlank()) {
-            return false  // No MAC configured = no matching
+        if (device.address.equals(gatewayMac, ignoreCase = true)) {
+            // Parse and store capabilities for pairing flow
+            gatewayCapabilities = AdvertisementParser.parseCapabilities(scanRecord)
+            
+            Log.d(TAG, "Device matched by configured MAC: ${device.address}")
+            Log.d(TAG, "  Pairing method: ${gatewayCapabilities?.pairingMethod}")
+            Log.d(TAG, "  Push-to-pair support: ${gatewayCapabilities?.supportsPushToPair}")
+            Log.d(TAG, "  Pairing active: ${gatewayCapabilities?.pairingEnabled}")
+            
+            return true
         }
         
         val deviceAddress = device.address
@@ -147,6 +165,34 @@ class OneControlDevicePlugin : BleDevicePlugin {
     override fun onDeviceDisconnected(device: BluetoothDevice) {
         Log.i(TAG, "Device disconnected: ${device.address}")
         // Cleanup if needed
+    }
+    
+    /**
+     * Get the Bluetooth bonding PIN for legacy gateways.
+     * Returns null for modern push-to-pair gateways.
+     * 
+     * This is used by BaseBleService to provide PIN during BLE bonding.
+     * Different from protocol PIN used in authentication.
+     */
+    fun getBondingPin(): String? {
+        return when (gatewayCapabilities?.pairingMethod) {
+            AdvertisementParser.PairingMethod.PIN,
+            AdvertisementParser.PairingMethod.NONE -> {
+                // Legacy gateway - use configured Bluetooth PIN, or fall back to protocol PIN
+                val pin = bluetoothPin?.takeIf { it.isNotBlank() } ?: gatewayPin
+                Log.d(TAG, "Providing bonding PIN for legacy gateway: ${pin.take(2)}****")
+                pin
+            }
+            AdvertisementParser.PairingMethod.PUSH_BUTTON -> {
+                Log.d(TAG, "Modern gateway - no bonding PIN needed (push-to-pair)")
+                null
+            }
+            else -> {
+                // Unknown - default to no PIN (safer for modern gateways)
+                Log.w(TAG, "Unknown pairing method - assuming push-to-pair")
+                null
+            }
+        }
     }
     
     override fun getMqttBaseTopic(device: BluetoothDevice): String {

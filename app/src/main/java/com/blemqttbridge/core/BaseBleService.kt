@@ -20,6 +20,7 @@ import com.blemqttbridge.core.interfaces.PluginConfig
 import com.blemqttbridge.core.interfaces.OutputPluginInterface
 import com.blemqttbridge.data.AppSettings
 import com.blemqttbridge.plugins.blescanner.BleScannerPlugin
+import com.blemqttbridge.plugins.onecontrol.OneControlDevicePlugin
 import com.blemqttbridge.plugins.output.MqttOutputPlugin
 import com.blemqttbridge.utils.AndroidTvHelper
 import kotlinx.coroutines.*
@@ -118,6 +119,9 @@ class BaseBleService : Service() {
     
     // Devices currently undergoing bonding process
     private val pendingBondDevices = mutableSetOf<String>()
+    
+    // Pending bond PINs for legacy gateway pairing: device address -> PIN
+    private val pendingBondPins = mutableMapOf<String, String>()
     
     private var isScanning = false
     private var bluetoothEnabled = true
@@ -254,6 +258,12 @@ class BaseBleService : Service() {
         val bondFilter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         registerReceiver(bondStateReceiver, bondFilter)
         Log.d(TAG, "Bond state receiver registered")
+        
+        // Register pairing request receiver with high priority to intercept before system dialog
+        val pairingFilter = IntentFilter(BluetoothDevice.ACTION_PAIRING_REQUEST)
+        pairingFilter.priority = IntentFilter.SYSTEM_HIGH_PRIORITY
+        registerReceiver(pairingRequestReceiver, pairingFilter)
+        Log.d(TAG, "Pairing request receiver registered with high priority")
         
         // Register Bluetooth state receiver
         val btStateFilter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
@@ -440,6 +450,14 @@ class BaseBleService : Service() {
             Log.d(TAG, "Bond state receiver unregistered")
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "Bond state receiver not registered")
+        }
+        
+        // Unregister pairing request receiver
+        try {
+            unregisterReceiver(pairingRequestReceiver)
+            Log.d(TAG, "Pairing request receiver unregistered")
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Pairing request receiver not registered")
         }
         
         // Unregister Bluetooth state receiver
@@ -1122,6 +1140,18 @@ class BaseBleService : Service() {
             if (isConfiguredDevice && requiresBonding && device.bondState == BluetoothDevice.BOND_NONE) {
                 Log.i(TAG, "🔐 Device ${device.address} requires bonding - initiating createBond()")
                 Log.i(TAG, "   (This is a CONFIGURED device - safe to bond)")
+                
+                // Check if plugin provides a bonding PIN (legacy gateways)
+                val bondingPin = (devicePlugin as? OneControlDevicePlugin)?.getBondingPin()
+                
+                if (bondingPin != null) {
+                    Log.i(TAG, "   Legacy gateway - will use PIN for bonding")
+                    // Store PIN temporarily for the pairing request broadcast
+                    pendingBondPins[device.address] = bondingPin
+                } else {
+                    Log.i(TAG, "   Modern gateway - using push-to-pair")
+                }
+                
                 pendingBondDevices.add(device.address)
                 updateNotification("Pairing with ${device.address}...")
                 val bondResult = device.createBond()
@@ -1200,6 +1230,34 @@ class BaseBleService : Service() {
             delay(2000)  // Brief delay to avoid immediate churn
             Log.i(TAG, "🔍 Resuming scan to find and reconnect ${device.address}")
             startScanning()
+        }
+    }
+    
+    /**
+     * Pairing request receiver for providing PIN programmatically.
+     * Intercepts the pairing request before the system dialog appears.
+     */
+    private val pairingRequestReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (BluetoothDevice.ACTION_PAIRING_REQUEST == intent.action) {
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                device?.let {
+                    val pin = pendingBondPins[it.address]
+                    if (pin != null) {
+                        Log.i(TAG, "Providing PIN for legacy gateway pairing: ${it.address}")
+                        try {
+                            // Convert PIN string to bytes
+                            val pinBytes = pin.toByteArray()
+                            // Set the PIN and abort the default pairing dialog
+                            it.setPin(pinBytes)
+                            abortBroadcast()
+                            Log.d(TAG, "PIN set successfully for ${it.address}")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to set PIN for ${it.address}", e)
+                        }
+                    }
+                }
+            }
         }
     }
     

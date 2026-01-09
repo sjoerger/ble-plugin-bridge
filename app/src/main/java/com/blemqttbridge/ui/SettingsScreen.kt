@@ -63,8 +63,10 @@ fun SettingsScreen(
     val oneControlEnabled by viewModel.oneControlEnabled.collectAsState()
     val oneControlGatewayMacFlow by viewModel.oneControlGatewayMac.collectAsState()
     val oneControlGatewayPinFlow by viewModel.oneControlGatewayPin.collectAsState()
+    val oneControlBluetoothPinFlow by viewModel.oneControlBluetoothPin.collectAsState()
     var oneControlGatewayMac by remember { mutableStateOf("") }
     var oneControlGatewayPin by remember { mutableStateOf("") }
+    var oneControlBluetoothPin by remember { mutableStateOf("") }
     
     val easyTouchEnabled by viewModel.easyTouchEnabled.collectAsState()
     val easyTouchThermostatMacFlow by viewModel.easyTouchThermostatMac.collectAsState()
@@ -79,6 +81,7 @@ fun SettingsScreen(
     // Sync flow values to local state when they change (fixes empty fields issue)
     LaunchedEffect(oneControlGatewayMacFlow) { oneControlGatewayMac = oneControlGatewayMacFlow }
     LaunchedEffect(oneControlGatewayPinFlow) { oneControlGatewayPin = oneControlGatewayPinFlow }
+    LaunchedEffect(oneControlBluetoothPinFlow) { oneControlBluetoothPin = oneControlBluetoothPinFlow }
     LaunchedEffect(easyTouchThermostatMacFlow) { easyTouchThermostatMac = easyTouchThermostatMacFlow }
     LaunchedEffect(easyTouchThermostatPasswordFlow) { easyTouchThermostatPassword = easyTouchThermostatPasswordFlow }
     LaunchedEffect(goPowerControllerMacFlow) { goPowerControllerMac = goPowerControllerMacFlow }
@@ -487,11 +490,34 @@ fun SettingsScreen(
                                 oneControlGatewayPin = it
                                 viewModel.setOneControlGatewayPin(it)
                             },
-                            label = { Text("PIN", style = MaterialTheme.typography.bodySmall) },
+                            label = { Text("Protocol PIN", style = MaterialTheme.typography.bodySmall) },
                             textStyle = MaterialTheme.typography.bodyMedium,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             enabled = !serviceEnabled
+                        )
+                        
+                        Spacer(modifier = Modifier.height(4.dp))
+                        
+                        OutlinedTextField(
+                            value = oneControlBluetoothPin,
+                            onValueChange = { 
+                                oneControlBluetoothPin = it
+                                viewModel.setOneControlBluetoothPin(it)
+                            },
+                            label = { Text("Bluetooth PIN (optional)", style = MaterialTheme.typography.bodySmall) },
+                            placeholder = { Text("Leave blank for newer gateways", style = MaterialTheme.typography.bodySmall) },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !serviceEnabled
+                        )
+                        
+                        Text(
+                            text = "Newer gateways (with 'Connect' button): leave blank\nOlder gateways (no button): enter PIN from sticker",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 4.dp)
                         )
                     }
                 }

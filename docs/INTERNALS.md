@@ -2,8 +2,8 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.4.9  
-> **Last Updated:** January 7, 2026  
+> **Current Version:** v2.5.0  
+> **Last Updated:** January 9, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -519,6 +519,111 @@ DATA_SERVICE_UUID = "00000030-0200-a58e-e411-afe28044e62c"
 DATA_WRITE_CHARACTERISTIC_UUID = "00000033-..."  // WRITE - commands to gateway
 DATA_READ_CHARACTERISTIC_UUID = "00000034-..."   // NOTIFY - events from gateway
 ```
+
+### Conditional Onboarding (Gateway Versions)
+
+OneControl gateways have evolved over time, with different hardware generations supporting different pairing methods. The official OneControl app detects gateway capabilities via **BLE advertising manufacturer-specific data** and adjusts the onboarding flow accordingly.
+
+#### Gateway Detection via Advertisement Data
+
+**PairingInfo Field:** Embedded in manufacturer-specific data (1 byte)
+- Bit 0: `IsPushToPairButtonPresentOnBus` - indicates physical pairing button support
+- Value 0x01 (bit 0 set): **Newer gateway** - supports push-to-pair
+- Value 0x00 (bit 0 clear) or absent: **Older gateway** - requires PIN-based pairing
+
+**PairingMethod Enum:**
+```kotlin
+enum class PairingMethod {
+    Unknown,
+    None,          // Older gateway - no specific method advertised
+    Pin,           // Older gateway - explicitly requires PIN
+    PushButton     // Newer gateway - physical button available
+}
+```
+
+#### Two Onboarding Scenarios
+
+**Scenario 1: Newer Gateways (Push-to-Pair)**
+
+*Hardware:* Unity X270D (confirmed working with this plugin)
+
+*Characteristics:*
+- Physical "Connect" button on RV control panel
+- Advertisement includes `PairingInfo` with bit 0 set
+- `PairingMethod = PushButton` in scan result
+- `PairingEnabled` flag toggles when button pressed
+
+*Pairing Flow:*
+1. User presses physical "Connect" button on control panel
+2. Gateway sets `PairingEnabled = true` in advertisement
+3. App scans for gateways with `PairingMethod == PushButton && PairingEnabled == true`
+4. App calls Android `createBond()` (lazy pairing - no PIN dialog)
+5. BLE bond established automatically
+6. Protocol authentication proceeds with configured PIN (from sticker)
+
+*PIN Usage:*
+- **NOT required for BLE bonding** - bond is established via push-button
+- **IS required for protocol authentication** - Step 2 Auth Service uses gatewayPin
+- User configures PIN once in app settings (e.g., "090336" from gateway sticker)
+
+**Scenario 2: Older Gateways (PIN-based)**
+
+*Hardware:* Older generation OneControl gateways (e.g., X1.5)
+
+*Characteristics:*
+- **No** physical "Connect" button on control panel
+- Advertisement reports `PairingMethod = Pin` or `PairingMethod = None`
+- No `PairingInfo` field or bit 0 clear
+
+*Pairing Flow:*
+1. App detects legacy gateway via `PairingMethod` check
+2. App prompts user: "Enter the PIN for {gateway name}"
+3. User enters PIN from gateway sticker
+4. App passes PIN to BLE stack during `createBond()`
+5. BLE bond established using entered PIN
+6. **Same PIN used for protocol authentication** in Step 2 Auth Service
+
+*PIN Usage:*
+- **Required for BLE bonding** - user must enter during pairing
+- **Also required for protocol authentication** - same PIN value used
+- PIN entered once during onboarding, stored for future connections
+
+#### Current Plugin Behavior
+
+**Our plugin currently assumes Scenario 1 (newer gateway):**
+- Requires user to manually pair gateway in Android Settings first
+- OR relies on lazy pairing via `createBond()` during connection
+- Assumes PIN from app settings is for protocol authentication only
+
+**This works fine for newer gateways but would fail for older gateways because:**
+1. No automatic PIN prompt during BLE bonding
+2. User must manually navigate to Android Settings → Bluetooth
+3. Android's PIN dialog appears, but app hasn't provided the PIN
+4. Bonding fails or requires manual PIN entry outside our app
+
+#### Implementation Status (v2.5.0)
+
+**✅ IMPLEMENTED** - Full support for both gateway types:
+
+1. **Advertisement parsing** - `AdvertisementParser.kt` detects `PairingInfo` and `PairingMethod`
+2. **Conditional UI** - Optional "Bluetooth PIN" field in settings for legacy gateways
+3. **PIN management** - Separate Bluetooth PIN (for bonding) and Protocol PIN (for auth)
+4. **Automatic pairing** - `BaseBleService` registers high-priority pairing receiver to provide PIN programmatically
+5. **Graceful degradation** - Assumes modern gateway if advertisement data missing
+
+**How it works:**
+- **Modern gateways**: Bluetooth PIN left blank → lazy pairing → user presses Connect button
+- **Legacy gateways**: User enters Bluetooth PIN → automatic pairing via `setPin()` → no button needed
+- Detection happens automatically via BLE manufacturer data (Lippert ID 0x0499, PairingInfo byte)
+
+**Files involved:**
+- `protocol/AdvertisementParser.kt` - Parses manufacturer data, returns `GatewayCapabilities`
+- `OneControlDevicePlugin.kt` - `getBondingPin()` returns PIN for legacy gateways only
+- `BaseBleService.kt` - `pairingRequestReceiver` intercepts pairing and provides PIN
+- `SettingsScreen.kt` - Optional "Bluetooth PIN" field with helper text
+- `AppSettings.kt` - Persists Bluetooth PIN separately from Protocol PIN
+
+---
 
 ### Authentication Flow
 
@@ -3883,6 +3988,7 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 | `protocol/CobsByteDecoder.kt` | Frame decoding |
 | `protocol/MyRvLinkCommandBuilder.kt` | Command builders |
 | `protocol/HomeAssistantMqttDiscovery.kt` | HA discovery payloads |
+| `protocol/AdvertisementParser.kt` | BLE advertisement parsing, gateway capability detection |
 | **EasyTouch Plugin** | |
 | `EasyTouchDevicePlugin.kt` | EasyTouch thermostat implementation |
 | `protocol/EasyTouchConstants.kt` | UUIDs, status indices, mode mappings |
@@ -3899,6 +4005,6 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 
 ---
 
-*Document version: 2.4.8*  
-*Last updated: January 7, 2026 - Multi-gateway support, OneControl guard check fix*  
+*Document version: 2.5.0*  
+*Last updated: January 9, 2026 - Conditional onboarding for legacy OneControl gateways*  
 *See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete version history*
