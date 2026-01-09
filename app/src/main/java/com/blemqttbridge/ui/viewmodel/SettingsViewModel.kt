@@ -32,7 +32,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val oneControlEnabled = settings.oneControlEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val oneControlGatewayMac = settings.oneControlGatewayMac.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_GATEWAY_MAC)
     val oneControlGatewayPin = settings.oneControlGatewayPin.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings.DEFAULT_GATEWAY_PIN)
-    val oneControlBluetoothPin = settings.oneControlBluetoothPin.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     
     val easyTouchEnabled = settings.easyTouchEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val easyTouchThermostatMac = settings.easyTouchThermostatMac.stateIn(viewModelScope, SharingStarted.Eagerly, "")
@@ -205,10 +204,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     
     fun setOneControlGatewayPin(pin: String) {
         viewModelScope.launch { settings.setOneControlGatewayPin(pin) }
-    }
-    
-    fun setOneControlBluetoothPin(pin: String) {
-        viewModelScope.launch { settings.setOneControlBluetoothPin(pin) }
     }
     
     fun setEasyTouchEnabled(enabled: Boolean) {

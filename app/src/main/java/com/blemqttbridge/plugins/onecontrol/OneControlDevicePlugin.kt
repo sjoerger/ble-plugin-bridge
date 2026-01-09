@@ -70,8 +70,7 @@ class OneControlDevicePlugin : BleDevicePlugin {
     
     // Configuration from settings
     private var gatewayMac: String = "24:DC:C3:ED:1E:0A"
-    private var gatewayPin: String = "090336"  // Protocol authentication PIN
-    private var bluetoothPin: String? = null    // BLE bonding PIN (for legacy gateways)
+    private var gatewayPin: String = "090336"  // PIN for both BLE bonding and protocol authentication
     private var gatewayCypher: Long = 0x8100080DL
     
     // Gateway capabilities (detected from advertisement)
@@ -94,19 +93,15 @@ class OneControlDevicePlugin : BleDevicePlugin {
     override fun initialize(context: Context, config: PluginConfig) {
         Log.i(TAG, "Initializing OneControl Device Plugin v$PLUGIN_VERSION")
         this.context = context
-        this.config = config  // Protocol authentication PIN
-        bluetoothPin = config.getString("bluetooth_pin", "")     // BLE bonding PIN (optional)
-        // gatewayCypher is hardcoded constant - same for all OneControl gateways
+        this.config = config
         
-        Log.i(TAG, "Configured for gateway: $gatewayMac")
-        Log.i(TAG, "  Protocol PIN: ${gatewayPin.take(2)}****")
-        if (!bluetoothPin.isNullOrBlank()) {
-            Log.i(TAG, "  Bluetooth PIN configured for legacy gateway pairing")
-        }
+        // Load configuration from settings
+        gatewayMac = config.getString("gateway_mac", gatewayMac)
         gatewayPin = config.getString("gateway_pin", gatewayPin)
         // gatewayCypher is hardcoded constant - same for all OneControl gateways
         
-        Log.i(TAG, "Configured for gateway: $gatewayMac (PIN: ${gatewayPin.take(2)}****)")
+        Log.i(TAG, "Configured for gateway: $gatewayMac")
+        Log.i(TAG, "  PIN: ${gatewayPin.take(2)}****")
     }
     
     override fun matchesDevice(
@@ -178,10 +173,9 @@ class OneControlDevicePlugin : BleDevicePlugin {
         return when (gatewayCapabilities?.pairingMethod) {
             AdvertisementParser.PairingMethod.PIN,
             AdvertisementParser.PairingMethod.NONE -> {
-                // Legacy gateway - use configured Bluetooth PIN, or fall back to protocol PIN
-                val pin = bluetoothPin?.takeIf { it.isNotBlank() } ?: gatewayPin
-                Log.d(TAG, "Providing bonding PIN for legacy gateway: ${pin.take(2)}****")
-                pin
+                // Legacy gateway - use PIN for both bonding and protocol authentication
+                Log.d(TAG, "Providing bonding PIN for legacy gateway: ${gatewayPin.take(2)}****")
+                gatewayPin
             }
             AdvertisementParser.PairingMethod.PUSH_BUTTON -> {
                 Log.d(TAG, "Modern gateway - no bonding PIN needed (push-to-pair)")
