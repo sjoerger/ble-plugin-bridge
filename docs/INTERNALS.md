@@ -2,7 +2,7 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.0  
+> **Current Version:** v2.5.2  
 > **Last Updated:** January 9, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
@@ -162,6 +162,19 @@
 - **Service layer:** `BaseBleService.kt`
 
 ### Recent Critical Changes
+
+**v2.5.2 (January 2026):**
+- **Multi-Plugin Boot Support:** Fixed `BootReceiver` to auto-start all enabled plugins on device boot
+  - Previously hardcoded to only start `onecontrol_v2` plugin
+  - Now queries `ServiceStateManager.getEnabledBlePlugins()` for runtime plugin list
+  - Empty plugin check prevents service start when no plugins enabled
+  - Added "Start on Boot" toggle to System Settings UI
+- **OneControl Configuration Fix:** Fixed critical bug in `OneControlDevicePlugin.initialize()`
+  - `gatewayMac` was never read from config, always used hardcoded test value "24:DC:C3:ED:1E:0A"
+  - Added `gatewayMac = config.getString("gateway_mac", gatewayMac)` to load user's configured MAC
+  - Simplified PIN architecture: removed separate `bluetooth_pin` field, now uses single `gateway_pin` for both BLE bonding and protocol authentication
+  - Updated UI: Single PIN field in OneControl settings instead of confusing dual-field setup
+  - Affects legacy gateway pairing: `getBondingPin()` now correctly returns PIN for legacy devices
 
 **v2.4.9 (January 2026):**
 - **EasyTouch Watchdog Fix:** Fixed false "stale connection" detection causing disconnects every 5 minutes
@@ -4005,6 +4018,6 @@ For maximum reliability on aggressive battery management devices (Samsung, Xiaom
 
 ---
 
-*Document version: 2.5.0*  
-*Last updated: January 9, 2026 - Conditional onboarding for legacy OneControl gateways*  
+*Document version: 2.5.2*  
+*Last updated: January 9, 2026 - Multi-plugin boot support and OneControl configuration fixes*  
 *See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete version history*

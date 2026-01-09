@@ -246,6 +246,54 @@ fun SystemSettingsScreen(
                 )
             }
             
+            // Auto-start on Boot
+            Text(
+                text = "Auto-Start",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 6.dp, end = 6.dp, bottom = 8.dp, top = 8.dp)
+            )
+            
+            var autoStartEnabled by remember {
+                mutableStateOf(com.blemqttbridge.receivers.BootReceiver.isAutoStartEnabled(context))
+            }
+            
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Start on Boot",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = if (autoStartEnabled)
+                            "Service starts automatically when device boots"
+                        else
+                            "Service requires manual start after boot",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (autoStartEnabled)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                
+                Switch(
+                    checked = autoStartEnabled,
+                    onCheckedChange = { enabled ->
+                        autoStartEnabled = enabled
+                        com.blemqttbridge.receivers.BootReceiver.setAutoStartEnabled(context, enabled)
+                    }
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
             // Doze Mode Keepalive Setting
             Text(
                 text = "Doze Mode Prevention",

@@ -75,19 +75,26 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
         
+        // Check if any plugins are enabled
+        val enabledPlugins = ServiceStateManager.getEnabledBlePlugins(context)
+        if (enabledPlugins.isEmpty()) {
+            Log.i(TAG, "$RESPONSE_PREFIX No plugins enabled, not starting service")
+            return
+        }
+        
         try {
             Log.i(TAG, "$RESPONSE_PREFIX Auto-start enabled, starting BLE bridge service...")
+            Log.i(TAG, "$RESPONSE_PREFIX Enabled plugins: ${enabledPlugins.joinToString(", ")}")
             
+            // Don't pass plugin IDs - let service load all enabled plugins from ServiceStateManager
             val serviceIntent = Intent(context, BaseBleService::class.java).apply {
                 action = BaseBleService.ACTION_START_SCAN
-                putExtra(BaseBleService.EXTRA_BLE_PLUGIN_ID, "onecontrol_v2")
-                putExtra(BaseBleService.EXTRA_OUTPUT_PLUGIN_ID, "mqtt")
             }
             
             context.startForegroundService(serviceIntent)
             
             Log.i(TAG, "$RESPONSE_PREFIX ✅ Service start command sent")
-            Log.i(TAG, "$RESPONSE_PREFIX Service will connect to MQTT and enable remote control")
+            Log.i(TAG, "$RESPONSE_PREFIX Service will connect to MQTT and load all enabled plugins")
             
         } catch (e: Exception) {
             Log.e(TAG, "$RESPONSE_PREFIX ❌ Failed to start service on boot", e)
