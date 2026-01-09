@@ -123,6 +123,9 @@ class BaseBleService : Service() {
     // Pending bond PINs for legacy gateway pairing: device address -> PIN
     private val pendingBondPins = mutableMapOf<String, String>()
     
+    // Device names from scan results: device address -> name (prevents 'null' in pairing dialog)
+    private val deviceNames = mutableMapOf<String, String>()
+    
     private var isScanning = false
     private var bluetoothEnabled = true
     
@@ -1010,12 +1013,18 @@ class BaseBleService : Service() {
             val device = result.device
             val scanRecord = result.scanRecord?.bytes
             
+            // Store device name from scan result (prevents 'null' in pairing dialog)
+            val deviceName = device.name ?: result.scanRecord?.deviceName
+            if (deviceName != null) {
+                deviceNames[device.address] = deviceName
+            }
+            
             scanResultCount++
             // Log every 10th device to avoid spam, but always log our target
             if (device.address.contains("24:DC:C3", ignoreCase = true) || 
                 device.address.contains("1E:0A", ignoreCase = true) ||
                 scanResultCount % 10 == 1) {
-                Log.d(TAG, "📡 Scan result #$scanResultCount: ${device.address} (name: ${device.name ?: "?"})")
+                Log.d(TAG, "📡 Scan result #$scanResultCount: ${device.address} (name: ${deviceName ?: "?"})")
             }
             
             // Check if we already have this device
@@ -1153,7 +1162,12 @@ class BaseBleService : Service() {
                 }
                 
                 pendingBondDevices.add(device.address)
-                updateNotification("Pairing with ${device.address}...")
+                
+                // Store device name if available (prevents 'null' in pairing dialog)
+                val displayName = device.name ?: deviceNames[device.address] ?: "OneControl Gateway"
+                deviceNames[device.address] = displayName
+                
+                updateNotification("Pairing with $displayName...")
                 val bondResult = device.createBond()
                 Log.i(TAG, "🔐 createBond() returned: $bondResult")
             } else if (!isConfiguredDevice && requiresBonding) {
@@ -1246,6 +1260,17 @@ class BaseBleService : Service() {
                     if (pin != null) {
                         Log.i(TAG, "Providing PIN for legacy gateway pairing: ${it.address}")
                         try {
+                            // Set device alias to show friendly name in pairing dialog
+                            val deviceName = deviceNames[it.address]
+                            if (deviceName != null && it.name == null) {
+                                try {
+                                    it.setAlias(deviceName)
+                                    Log.d(TAG, "Set device alias to: $deviceName")
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Could not set device alias (Android API level may not support it)", e)
+                                }
+                            }
+                            
                             // Convert PIN string to bytes
                             val pinBytes = pin.toByteArray()
                             // Set the PIN and abort the default pairing dialog
