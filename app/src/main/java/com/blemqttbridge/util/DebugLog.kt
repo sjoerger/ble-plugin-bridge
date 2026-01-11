@@ -18,12 +18,12 @@ object DebugLog {
     
     /**
      * Check if debug logging should be enabled.
-     * Returns true if in debug build OR trace capture is active.
+     * Returns true if in debug build OR trace capture is active OR force debug is enabled.
      * Must be internal and annotated for use in inline functions.
      */
     @PublishedApi
     internal fun isDebugEnabled(): Boolean {
-        return BuildConfig.DEBUG || BaseBleService.traceActive.value
+        return BuildConfig.DEBUG || BuildConfig.FORCE_DEBUG_LOG || BaseBleService.traceActive.value
     }
     
     /**

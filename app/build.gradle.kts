@@ -44,6 +44,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("boolean", "FORCE_DEBUG_LOG", "true")
         }
     }
 
