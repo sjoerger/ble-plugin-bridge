@@ -78,6 +78,12 @@ fun SettingsScreen(
     var goPowerControllerMac by remember { mutableStateOf("") }
     
     // Sync flow values to local state when they change (fixes empty fields issue)
+    LaunchedEffect(viewModel.mqttBrokerHost.value) { mqttBrokerHost = viewModel.mqttBrokerHost.value }
+    LaunchedEffect(viewModel.mqttBrokerPort.value) { mqttBrokerPort = viewModel.mqttBrokerPort.value.toString() }
+    LaunchedEffect(viewModel.mqttUsername.value) { mqttUsername = viewModel.mqttUsername.value }
+    LaunchedEffect(viewModel.mqttPassword.value) { mqttPassword = viewModel.mqttPassword.value }
+    LaunchedEffect(viewModel.mqttTopicPrefix.value) { mqttTopicPrefix = viewModel.mqttTopicPrefix.value }
+    
     LaunchedEffect(oneControlGatewayMacFlow) { oneControlGatewayMac = oneControlGatewayMacFlow }
     LaunchedEffect(oneControlGatewayPinFlow) { oneControlGatewayPin = oneControlGatewayPinFlow }
 

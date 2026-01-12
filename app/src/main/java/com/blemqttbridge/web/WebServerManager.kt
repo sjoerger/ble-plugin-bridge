@@ -132,10 +132,18 @@ class WebServerManager(
             border-radius: 4px;
             border-left: 4px solid #1976d2;
         }
+        .mqtt-config-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            background: #f9f9f9;
+            border-radius: 4px;
+            border-left: 4px solid #1976d2;
+        }
         .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; text-align: left; }
         .plugin-status { font-size: 14px; color: #666; text-align: left; }
         .plugin-status-line { margin-bottom: 8px; text-align: left; }
         .plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
+        .mqtt-config-field { margin: 4px 0; padding-left: 0; text-align: left; font-size: 14px; color: #666; }
         .plugin-healthy { color: #4caf50; }
         .plugin-unhealthy { color: #f44336; }
         .toggle-switch {
@@ -503,13 +511,11 @@ class WebServerManager(
                 const editDisabled = mqttRunning ? 'disabled' : '';
                 
                 const html = ${'`'}
-                    ${buildEditableField('mqtt', 'broker', 'MQTT Broker', data.mqttBroker, editDisabled, false)}
-                    ${buildEditableField('mqtt', 'port', 'MQTT Port', data.mqttPort, editDisabled, false)}
-                    ${buildEditableField('mqtt', 'username', 'MQTT Username', data.mqttUsername, editDisabled, false)}
-                    ${buildEditableField('mqtt', 'password', 'MQTT Password', data.mqttPassword, editDisabled, true)}
-                    <div class="status-row">
-                        <span class="status-label">Enabled Plugins:</span>
-                        <span class="status-value">${'$'}{data.enabledPlugins.join(', ') || 'None'}</span>
+                    <div class="mqtt-config-item">
+                        <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'broker', 'MQTT Broker', data.mqttBroker, editDisabled, false)}</div>
+                        <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'port', 'MQTT Port', data.mqttPort, editDisabled, false)}</div>
+                        <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'username', 'MQTT Username', data.mqttUsername, editDisabled, false)}</div>
+                        <div class="mqtt-config-field">${'$'}{buildEditableField('mqtt', 'password', 'MQTT Password', data.mqttPassword, editDisabled, true)}</div>
                     </div>
                 ${'`'};
                 document.getElementById('config-info').innerHTML = html;
@@ -619,7 +625,12 @@ class WebServerManager(
                 if (result.success) {
                     configChanged[pluginId] = true;
                     delete editingFields[fieldId]; // Clear edit state
-                    loadPlugins(); // Reload to show saved value
+                    // Reload appropriate section based on what was edited
+                    if (pluginId === 'mqtt') {
+                        loadConfig(); // Reload MQTT config section
+                    } else {
+                        loadPlugins(); // Reload plugin section
+                    }
                 } else {
                     alert('Failed to save: ' + (result.error || 'Unknown error'));
                 }
@@ -796,10 +807,14 @@ class WebServerManager(
                 if (!result.success) {
                     alert('Failed to ' + (enable ? 'connect' : 'disconnect') + ' MQTT: ' + (result.error || 'Unknown error'));
                     loadStatus(); // Refresh to show actual state
+                    loadConfig(); // Update edit button states
+                } else {
+                    loadConfig(); // Update edit button states
                 }
             } catch (error) {
                 alert('Error controlling MQTT: ' + error.message);
                 loadStatus(); // Refresh to show actual state
+                loadConfig(); // Update edit button states
             }
         }
     </script>
