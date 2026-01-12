@@ -600,8 +600,11 @@ fun SystemSettingsScreen(
                         HorizontalDivider()
                         Spacer(modifier = Modifier.height(12.dp))
                         
-                        // Get IP address
-                        val ipAddress = remember { viewModel.getLocalIpAddress() }
+                        // Get IP address asynchronously to avoid blocking composition
+                        var ipAddress by remember { mutableStateOf("...") }
+                        LaunchedEffect(Unit) {
+                            ipAddress = viewModel.getLocalIpAddress()
+                        }
                         val webUrl = "http://$ipAddress:8088"
                         
                         Column {
