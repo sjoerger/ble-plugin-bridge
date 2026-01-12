@@ -2498,8 +2498,7 @@ class BaseBleService : Service() {
             // Re-initialize with same config
             val settings = AppSettings(applicationContext)
             val config = mapOf(
-                "broker_url" to settings.mqttBrokerHost.first(),
-                "port" to settings.mqttBrokerPort.first().toString(),
+                "broker_url" to "tcp://${settings.mqttBrokerHost.first()}:${settings.mqttBrokerPort.first()}",
                 "username" to settings.mqttUsername.first(),
                 "password" to settings.mqttPassword.first(),
                 "topic_prefix" to settings.mqttTopicPrefix.first()

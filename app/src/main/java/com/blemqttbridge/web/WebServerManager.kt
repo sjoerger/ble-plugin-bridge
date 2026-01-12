@@ -582,12 +582,15 @@ class WebServerManager(
                 context.startForegroundService(intent)
                 Log.i(TAG, "Service start requested via web interface")
             } else {
-                // Stop service
-                val intent = android.content.Intent(context, BaseBleService::class.java).apply {
-                    action = BaseBleService.ACTION_STOP_SERVICE
-                }
-                context.startService(intent)
-                Log.i(TAG, "Service stop requested via web interface")
+                // Stop service - schedule on a background thread to avoid blocking
+                Thread {
+                    Thread.sleep(100) // Small delay to send response first
+                    val intent = android.content.Intent(context, BaseBleService::class.java).apply {
+                        action = BaseBleService.ACTION_STOP_SERVICE
+                    }
+                    context.startService(intent)
+                    Log.i(TAG, "Service stop requested via web interface")
+                }.start()
             }
             
             newFixedLengthResponse(
