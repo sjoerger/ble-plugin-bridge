@@ -89,6 +89,8 @@ class WebServerManager(
             background: #1976d2;
             color: white;
             padding: 20px;
+            position: relative;
+            z-index: 1;
             border-radius: 8px;
             margin-bottom: 20px;
         }
@@ -283,6 +285,7 @@ class WebServerManager(
         // Global state
         let serviceRunning = false;
         let configChanged = {}; // Track which configs have changed
+        let editingFields = {}; // Track which fields are currently being edited
         
         // Load status on page load
         window.addEventListener('load', () => {
@@ -292,7 +295,10 @@ class WebServerManager(
             // Auto-refresh status every 5 seconds
             setInterval(() => {
                 loadStatus();
-                loadPlugins();
+                // Only refresh plugins if not currently editing
+                if (Object.keys(editingFields).length === 0) {
+                    loadPlugins();
+                }
             }, 5000);
         });
 
@@ -385,7 +391,6 @@ class WebServerManager(
                     // Add plugin-specific fields
                     if (pluginId === 'onecontrol') {
                         configLines.push(buildEditableField(pluginId, 'gatewayPin', 'Gateway PIN', status.gatewayPin || '', editDisabled, true));
-                        configLines.push(buildEditableField(pluginId, 'bluetoothPin', 'Bluetooth PIN', status.bluetoothPin || '', editDisabled, true));
                     } else if (pluginId === 'easytouch') {
                         configLines.push(buildEditableField(pluginId, 'password', 'Password', status.password || '', editDisabled, true));
                     }
@@ -429,6 +434,7 @@ class WebServerManager(
 
         function editField(pluginId, fieldName, isSecret) {
             const fieldId = `${'$'}{pluginId}_${'$'}{fieldName}`;
+            editingFields[fieldId] = true; // Track that this field is being edited
             document.getElementById(`${'$'}{fieldId}_display`).style.display = 'none';
             document.getElementById(`${'$'}{fieldId}_input`).style.display = 'inline-block';
             document.getElementById(`${'$'}{fieldId}_edit`).style.display = 'none';
@@ -452,6 +458,7 @@ class WebServerManager(
                 const result = await response.json();
                 if (result.success) {
                     configChanged[pluginId] = true;
+                    delete editingFields[fieldId]; // Clear edit state
                     loadPlugins(); // Reload to show saved value
                 } else {
                     alert('Failed to save: ' + (result.error || 'Unknown error'));
@@ -821,7 +828,6 @@ class WebServerManager(
                     "onecontrol" -> when (field) {
                         "macAddress" -> settings.setOneControlGatewayMac(value)
                         "gatewayPin" -> settings.setOneControlGatewayPin(value)
-                        "bluetoothPin" -> settings.setOneControlBluetoothPin(value)
                         else -> return@runBlocking
                     }
                     "easytouch" -> when (field) {
