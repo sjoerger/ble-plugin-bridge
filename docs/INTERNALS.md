@@ -2,8 +2,8 @@
 
 > **Purpose:** This document provides comprehensive technical documentation for the BLE Plugin Bridge Android application. It is designed to enable future LLM-assisted development, particularly for adding new entity types to the OneControl plugin or creating entirely new device plugins.
 
-> **Current Version:** v2.5.2  
-> **Last Updated:** January 9, 2026  
+> **Current Version:** v2.5.4  
+> **Last Updated:** January 12, 2026  
 > **Version History:** See [GitHub Releases](https://github.com/phurth/ble-plugin-bridge/releases) for complete changelog
 
 ---
@@ -14,6 +14,7 @@
    - [Common Tasks](#common-tasks)
    - [Key Files](#key-files)
    - [Recent Critical Changes](#recent-critical-changes)
+   - [v2.5.4 Breaking Changes](#v254-breaking-changes-january-2026)
 
 1. [High-Level Architecture](#1-high-level-architecture)
    - [Overview](#overview)
@@ -205,6 +206,42 @@
 
 **v2.4.6 (January 2026):**
 - Android TV power fix (prevents service kill on TV standby)
+
+### v2.5.4 Breaking Changes (January 2026)
+
+**⚠️ BREAKING CHANGE - Device ID Stability:**
+
+Changed device identification from Android ID to Bluetooth MAC address to prevent Home Assistant entity duplication after app updates.
+
+**Impact:**
+- Existing Home Assistant entities will appear as "unavailable"
+- New entities with different IDs will be created
+- Users must manually remove old entities from Home Assistant
+
+**Device ID Format Change:**
+```
+# Old (v2.5.3 and earlier)
+homeassistant/sensor/ble_mqtt_bridge_929334/...
+
+# New (v2.5.4+)
+homeassistant/sensor/ble_mqtt_bridge_0c9919/...
+```
+
+**Why This Change:**
+- Android ID can change across app updates/OS updates
+- Bluetooth MAC is stable and guaranteed unique per device
+- Prevents accumulation of duplicate entities in Home Assistant
+
+**Migration Steps:**
+1. Install v2.5.4
+2. New entities will appear in Home Assistant
+3. Delete old entities manually (filter by "unavailable")
+4. Update dashboards/automations to use new entity IDs
+
+**Other v2.5.4 Changes:**
+- OneControl MAC normalization fix (resolves PIN pairing failures)
+- Boot receiver enhancements for Android TV (LOCKED_BOOT_COMPLETED, QUICKBOOT_POWERON)
+- FORCE_DEBUG_LOG enabled for both debug and release builds
 
 ---
 

@@ -48,6 +48,9 @@ local.properties
 ehthumbs.db
 Thumbs.db
 
+# Development context (local use only)
+Claude.md
+
 # Backup files
 *.bak
 *.swp

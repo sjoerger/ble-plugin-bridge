@@ -39,13 +39,30 @@ class BleScannerPlugin(
         private const val DEVICE_MODEL = "BLE scanner plugin for the Android BLE to MQTT Bridge"
         
         /**
-         * Get a unique device suffix based on Android device ID.
+         * Get a unique device suffix based on Bluetooth adapter MAC address.
+         * This is stable across app upgrades, unlike Android ID which can change.
+         * Returns last 6 characters to keep identifiers short.
          */
         private fun getDeviceSuffix(context: Context): String {
             return try {
-                val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-                androidId?.takeLast(6)?.lowercase() ?: "unknown"
+                val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                val btMac = bluetoothAdapter?.address
+                
+                // Use BT MAC if available and not the dummy address
+                if (btMac != null && btMac != "02:00:00:00:00:00") {
+                    // Use last 6 chars of BT MAC (e.g., "0c9919" from "C0:09:25:0C:99:19")
+                    btMac.replace(":", "").takeLast(6).lowercase()
+                } else {
+                    // Fallback to Android ID only if BT MAC unavailable
+                    Log.w(TAG, "Bluetooth MAC unavailable, falling back to Android ID")
+                    val androidId = Settings.Secure.getString(
+                        context.contentResolver,
+                        Settings.Secure.ANDROID_ID
+                    )
+                    androidId?.takeLast(6)?.lowercase() ?: "unknown"
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to get device suffix", e)
                 "unknown"
             }
         }

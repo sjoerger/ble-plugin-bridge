@@ -53,6 +53,19 @@ class OneControlDevicePlugin : BleDevicePlugin {
         
         // Device identification
         private const val DEVICE_NAME_PREFIX = "LCI"
+        
+        /**
+         * Normalize MAC address to consistent format: uppercase with colons.
+         * Android's BluetoothDevice.address returns uppercase format like "24:DC:C3:ED:1E:0A".
+         * This ensures configs and comparisons use the same format.
+         */
+        private fun normalizeMac(mac: String?): String? {
+            if (mac.isNullOrBlank()) return null
+            // Remove all non-hex characters, convert to uppercase, add colons
+            val cleaned = mac.replace("[^0-9A-Fa-f]".toRegex(), "")
+            if (cleaned.length != 12) return mac // Invalid MAC, return as-is
+            return cleaned.chunked(2).joinToString(":").uppercase()
+        }
     }
     
     override val pluginId: String = PLUGIN_ID
@@ -95,8 +108,8 @@ class OneControlDevicePlugin : BleDevicePlugin {
         this.context = context
         this.config = config
         
-        // Load configuration from settings
-        gatewayMac = config.getString("gateway_mac", gatewayMac)
+        // Load configuration from settings with MAC normalization
+        gatewayMac = normalizeMac(config.getString("gateway_mac", gatewayMac)) ?: gatewayMac
         gatewayPin = config.getString("gateway_pin", gatewayPin)
         // gatewayCypher is hardcoded constant - same for all OneControl gateways
         
@@ -112,7 +125,11 @@ class OneControlDevicePlugin : BleDevicePlugin {
         // This prevents connecting to neighbors' devices in RV parks.
         // No auto-discovery by device name or service UUID.
         
-        if (device.address.equals(gatewayMac, ignoreCase = true)) {
+        // Normalize both MACs to ensure case-insensitive comparison
+        val normalizedDeviceMac = normalizeMac(device.address)
+        val normalizedGatewayMac = normalizeMac(gatewayMac)
+        
+        if (normalizedDeviceMac == normalizedGatewayMac) {
             // Parse and store capabilities for pairing flow
             gatewayCapabilities = AdvertisementParser.parseCapabilities(scanRecord)
             
@@ -121,12 +138,6 @@ class OneControlDevicePlugin : BleDevicePlugin {
             Log.d(TAG, "  Push-to-pair support: ${gatewayCapabilities?.supportsPushToPair}")
             Log.d(TAG, "  Pairing active: ${gatewayCapabilities?.pairingEnabled}")
             
-            return true
-        }
-        
-        val deviceAddress = device.address
-        if (deviceAddress.equals(gatewayMac, ignoreCase = true)) {
-            Log.d(TAG, "Device matched by configured MAC: $deviceAddress")
             return true
         }
         
