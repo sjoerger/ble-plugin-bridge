@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.core.BaseBleService
+import com.blemqttbridge.core.ServiceStateManager
 import com.blemqttbridge.data.AppSettings
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.flow.first
@@ -48,6 +49,8 @@ class WebServerManager(
                 uri == "/api/control/service" && method == Method.POST -> handleServiceControl(session)
                 uri == "/api/control/mqtt" && method == Method.POST -> handleMqttControl(session)
                 uri == "/api/config/plugin" && method == Method.POST -> handlePluginConfig(session)
+                uri == "/api/plugins/add" && method == Method.POST -> handlePluginAdd(session)
+                uri == "/api/plugins/remove" && method == Method.POST -> handlePluginRemove(session)
                 uri.startsWith("/api/") -> newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "application/json",
@@ -241,6 +244,114 @@ class WebServerManager(
             margin-top: -8px;
             margin-bottom: 12px;
         }
+        .add-plugin-btn {
+            background: #4caf50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+        .add-plugin-btn:hover { background: #45a049; }
+        .add-plugin-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .remove-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+            line-height: 1;
+            z-index: 1;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .remove-btn:hover { background: #d32f2f; }
+        .remove-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        .modal-content {
+            background-color: white;
+            margin: 15% auto;
+            padding: 20px;
+            border-radius: 8px;
+            width: 80%;
+            max-width: 400px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .modal-content h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .modal-buttons {
+            margin-top: 20px;
+            text-align: right;
+        }
+        .modal-btn {
+            padding: 8px 16px;
+            margin-left: 8px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .modal-btn-primary {
+            background: #1976d2;
+            color: white;
+        }
+        .modal-btn-primary:hover { background: #1565c0; }
+        .modal-btn-secondary {
+            background: #ccc;
+            color: #333;
+        }
+        .modal-btn-secondary:hover { background: #bbb; }
+        .modal-btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        .modal-btn-danger:hover { background: #d32f2f; }
+        .plugin-list {
+            margin: 15px 0;
+        }
+        .plugin-option {
+            padding: 10px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            background: white;
+        }
+        .plugin-option:hover { background: #f0f0f0; }
+        .plugin-option.disabled {
+            background: #f5f5f5;
+            color: #999;
+            cursor: not-allowed;
+        }
+        .plugin-option.disabled:hover { background: #f5f5f5; }
     </style>
 </head>
 <body>
@@ -263,7 +374,48 @@ class WebServerManager(
         <div class="card">
             <h2>Plugin Status</h2>
             <div class="section-helper">Note: Service must be stopped to edit plugin configurations</div>
+            <button id="add-plugin-btn" class="add-plugin-btn" onclick="showAddPluginDialog()" disabled>Add Plugin</button>
             <div id="plugin-status" class="loading">Loading...</div>
+        </div>
+
+        <!-- Add Plugin Modal -->
+        <div id="addPluginModal" class="modal">
+            <div class="modal-content">
+                <h3>Add Plugin</h3>
+                <div class="plugin-list">
+                    <div class="plugin-option" id="add-onecontrol" onclick="selectPluginToAdd('onecontrol')">
+                        <strong>OneControl</strong><br>
+                        <span style="font-size: 12px; color: #666;">LCI RV control system gateway</span>
+                    </div>
+                    <div class="plugin-option" id="add-easytouch" onclick="selectPluginToAdd('easytouch')">
+                        <strong>EasyTouch</strong><br>
+                        <span style="font-size: 12px; color: #666;">Micro-Air EasyTouch RV thermostat</span>
+                    </div>
+                    <div class="plugin-option" id="add-gopower" onclick="selectPluginToAdd('gopower')">
+                        <strong>GoPower</strong><br>
+                        <span style="font-size: 12px; color: #666;">Solar controller</span>
+                    </div>
+                    <div class="plugin-option" id="add-blescanner" onclick="selectPluginToAdd('blescanner')">
+                        <strong>BLE Scanner</strong><br>
+                        <span style="font-size: 12px; color: #666;">Generic BLE device scanner</span>
+                    </div>
+                </div>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeAddPluginDialog()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Confirm Remove Modal -->
+        <div id="confirmRemoveModal" class="modal">
+            <div class="modal-content">
+                <h3>Remove Plugin</h3>
+                <p id="remove-message">Are you sure you want to remove this plugin?</p>
+                <div class="modal-buttons">
+                    <button class="modal-btn modal-btn-secondary" onclick="closeRemoveDialog()">Cancel</button>
+                    <button class="modal-btn modal-btn-danger" onclick="confirmRemove()">Remove</button>
+                </div>
+            </div>
         </div>
 
         <div class="card">
@@ -326,6 +478,12 @@ class WebServerManager(
                     </div>
                 ${'`'};
                 document.getElementById('service-status').innerHTML = html;
+                
+                // Enable/disable Add Plugin button based on service state
+                const addPluginBtn = document.getElementById('add-plugin-btn');
+                if (addPluginBtn) {
+                    addPluginBtn.disabled = serviceRunning;
+                }
             } catch (error) {
                 document.getElementById('service-status').innerHTML = 
                     '<div style="color: #f44336;">Failed to load status</div>';
@@ -399,7 +557,8 @@ class WebServerManager(
                     }
                     
                     html += ${'`'}
-                        <div class="plugin-item">
+                        <div class="plugin-item" style="position: relative;">
+                            <button class="remove-btn" onclick="showRemoveDialog('${'$'}{pluginId}')" ${'$'}{serviceRunning ? 'disabled' : ''}>×</button>
                             <div class="plugin-name">${'$'}{pluginId}${'$'}{showHelper ? '<span class="helper-text">Changes will take effect upon restarting service</span>' : ''}</div>
                             <div class="plugin-status">
                                 ${'$'}{showHealthIndicators ? ${'`'}<div class="plugin-status-line">
@@ -503,6 +662,108 @@ class WebServerManager(
 
         function downloadBleTrace() {
             window.open('/api/logs/ble', '_blank');
+        }
+
+        // Plugin add/remove functions
+        let pluginToRemove = null;
+        let enabledPlugins = [];
+
+        async function showAddPluginDialog() {
+            // Fetch current plugins to disable already-added ones
+            try {
+                const response = await fetch('/api/plugins');
+                const data = await response.json();
+                enabledPlugins = Object.keys(data);
+                
+                // Update plugin options
+                ['onecontrol', 'easytouch', 'gopower', 'blescanner'].forEach(pluginId => {
+                    const option = document.getElementById(`add-${'$'}{pluginId}`);
+                    if (enabledPlugins.includes(pluginId)) {
+                        option.classList.add('disabled');
+                        option.onclick = null;
+                    } else {
+                        option.classList.remove('disabled');
+                        option.onclick = () => selectPluginToAdd(pluginId);
+                    }
+                });
+                
+                document.getElementById('addPluginModal').style.display = 'block';
+            } catch (error) {
+                alert('Failed to load plugin list: ' + error.message);
+            }
+        }
+
+        function closeAddPluginDialog() {
+            document.getElementById('addPluginModal').style.display = 'none';
+        }
+
+        async function selectPluginToAdd(pluginId) {
+            if (enabledPlugins.includes(pluginId)) {
+                return; // Already enabled
+            }
+            
+            try {
+                const response = await fetch('/api/plugins/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ plugin: pluginId })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    closeAddPluginDialog();
+                    loadPlugins();
+                    loadConfig();
+                } else {
+                    alert('Failed to add plugin: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error adding plugin: ' + error.message);
+            }
+        }
+
+        function showRemoveDialog(pluginId) {
+            pluginToRemove = pluginId;
+            document.getElementById('remove-message').textContent = 
+                `Are you sure you want to remove the ${'$'}{pluginId} plugin?`;
+            document.getElementById('confirmRemoveModal').style.display = 'block';
+        }
+
+        function closeRemoveDialog() {
+            pluginToRemove = null;
+            document.getElementById('confirmRemoveModal').style.display = 'none';
+        }
+
+        async function confirmRemove() {
+            if (!pluginToRemove) return;
+            
+            try {
+                const response = await fetch('/api/plugins/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ plugin: pluginToRemove })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    closeRemoveDialog();
+                    loadPlugins();
+                    loadConfig();
+                } else {
+                    alert('Failed to remove plugin: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error removing plugin: ' + error.message);
+            }
+        }
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            const addModal = document.getElementById('addPluginModal');
+            const removeModal = document.getElementById('confirmRemoveModal');
+            if (event.target === addModal) {
+                closeAddPluginDialog();
+            } else if (event.target === removeModal) {
+                closeRemoveDialog();
+            }
         }
 
         async function toggleService(enable) {
@@ -867,6 +1128,142 @@ class WebServerManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error handling plugin config", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handlePluginAdd(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val plugin = jsonObject.getString("plugin")
+
+            // Validate service is stopped
+            val service = BaseBleService.getInstance()
+            if (service != null) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped to add plugins"}"""
+                )
+            }
+
+            // Add plugin by setting enabled=true in both AppSettings and ServiceStateManager
+            val settings = AppSettings(context)
+            runBlocking {
+                when (plugin) {
+                    "onecontrol" -> {
+                        settings.setOneControlEnabled(true)
+                        ServiceStateManager.enableBlePlugin(context, "onecontrol")
+                    }
+                    "easytouch" -> {
+                        settings.setEasyTouchEnabled(true)
+                        ServiceStateManager.enableBlePlugin(context, "easytouch")
+                    }
+                    "gopower" -> {
+                        settings.setGoPowerEnabled(true)
+                        ServiceStateManager.enableBlePlugin(context, "gopower")
+                    }
+                    "blescanner" -> {
+                        settings.setBleScannerEnabled(true)
+                        ServiceStateManager.enableBlePlugin(context, "blescanner")
+                    }
+                    else -> return@runBlocking newFixedLengthResponse(
+                        Response.Status.BAD_REQUEST,
+                        "application/json",
+                        """{"success":false,"error":"Unknown plugin: $plugin"}"""
+                    )
+                }
+            }
+
+            Log.i(TAG, "Plugin added via web UI: $plugin")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding plugin", e)
+            newFixedLengthResponse(
+                Response.Status.INTERNAL_ERROR,
+                "application/json",
+                """{"success":false,"error":"${e.message}"}"""
+            )
+        }
+    }
+
+    private fun handlePluginRemove(session: IHTTPSession): Response {
+        return try {
+            // Parse request body
+            val files = mutableMapOf<String, String>()
+            session.parseBody(files)
+            val body = files["postData"] ?: return newFixedLengthResponse(
+                Response.Status.BAD_REQUEST,
+                "application/json",
+                """{"success":false,"error":"No request body"}"""
+            )
+
+            val jsonObject = JSONObject(body)
+            val plugin = jsonObject.getString("plugin")
+
+            // Validate service is stopped
+            val service = BaseBleService.getInstance()
+            if (service != null) {
+                return newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    """{"success":false,"error":"Service must be stopped to remove plugins"}"""
+                )
+            }
+
+            // Remove plugin by setting enabled=false in both AppSettings and ServiceStateManager
+            val settings = AppSettings(context)
+            runBlocking {
+                when (plugin) {
+                    "onecontrol" -> {
+                        settings.setOneControlEnabled(false)
+                        ServiceStateManager.disableBlePlugin(context, "onecontrol")
+                    }
+                    "easytouch" -> {
+                        settings.setEasyTouchEnabled(false)
+                        ServiceStateManager.disableBlePlugin(context, "easytouch")
+                    }
+                    "gopower" -> {
+                        settings.setGoPowerEnabled(false)
+                        ServiceStateManager.disableBlePlugin(context, "gopower")
+                    }
+                    "blescanner" -> {
+                        settings.setBleScannerEnabled(false)
+                        ServiceStateManager.disableBlePlugin(context, "blescanner")
+                    }
+                    else -> return@runBlocking newFixedLengthResponse(
+                        Response.Status.BAD_REQUEST,
+                        "application/json",
+                        """{"success":false,"error":"Unknown plugin: $plugin"}"""
+                    )
+                }
+            }
+
+            Log.i(TAG, "Plugin removed via web UI: $plugin")
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                """{"success":true}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing plugin", e)
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 "application/json",
