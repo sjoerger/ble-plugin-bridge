@@ -122,9 +122,9 @@ class WebServerManager(
             border-radius: 4px;
             border-left: 4px solid #1976d2;
         }
-        .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; }
-        .plugin-status { font-size: 14px; color: #666; }
-        .plugin-status-line { margin-bottom: 8px; }
+        .plugin-name { font-weight: 600; color: #333; margin-bottom: 5px; text-align: left; }
+        .plugin-status { font-size: 14px; color: #666; text-align: left; }
+        .plugin-status-line { margin-bottom: 8px; text-align: left; }
         .plugin-config-field { margin: 4px 0; padding-left: 0; text-align: left; }
         .plugin-healthy { color: #4caf50; }
         .plugin-unhealthy { color: #f44336; }
