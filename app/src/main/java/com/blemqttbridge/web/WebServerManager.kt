@@ -271,18 +271,40 @@ class WebServerManager(
                         ? status.macAddresses.join(', ') 
                         : 'None';
                     const enabled = status.enabled ? 'Yes' : 'No';
+                    
+                    // Build configuration fields line
+                    let configFields = [];
+                    configFields.push(`Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span>`);
+                    configFields.push(`MAC Address(es): <span>${'$'}{macAddresses}</span>`);
+                    
+                    // Add plugin-specific fields
+                    if (pluginId === 'onecontrol') {
+                        if (status.gatewayPin) {
+                            const maskedPin = '•'.repeat(status.gatewayPin.length);
+                            configFields.push(`Gateway PIN: <span>${'$'}{maskedPin}</span>`);
+                        }
+                        if (status.bluetoothPin) {
+                            const maskedPin = '•'.repeat(status.bluetoothPin.length);
+                            configFields.push(`Bluetooth PIN: <span>${'$'}{maskedPin}</span>`);
+                        }
+                    } else if (pluginId === 'easytouch') {
+                        if (status.password) {
+                            const maskedPassword = '•'.repeat(status.password.length);
+                            configFields.push(`Password: <span>${'$'}{maskedPassword}</span>`);
+                        }
+                    }
+                    
                     html += ${'`'}
                         <div class="plugin-item">
                             <div class="plugin-name">${'$'}{pluginId}</div>
                             <div class="plugin-status">
                                 <div style="margin-bottom: 5px;">
-                                    Enabled: <span class="${'$'}{status.enabled ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{enabled}</span> | 
-                                    MAC Address(es): <span>${'$'}{macAddresses}</span>
-                                </div>
-                                <div>
                                     Connected: <span class="${'$'}{status.connected ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.connected ? 'Yes' : 'No'}</span> | 
                                     Authenticated: <span class="${'$'}{status.authenticated ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.authenticated ? 'Yes' : 'No'}</span> | 
                                     Data Healthy: <span class="${'$'}{status.dataHealthy ? 'plugin-healthy' : 'plugin-unhealthy'}">${'$'}{status.dataHealthy ? 'Yes' : 'No'}</span>
+                                </div>
+                                <div>
+                                    ${'$'}{configFields.join(' | ')}
                                 </div>
                             </div>
                         </div>
@@ -393,6 +415,8 @@ class WebServerManager(
                     val mac = settings.oneControlGatewayMac.first()
                     if (mac.isNotBlank()) put(mac)
                 })
+                put("gatewayPin", settings.oneControlGatewayPin.first())
+                put("bluetoothPin", settings.oneControlBluetoothPin.first())
                 put("connected", status.connected)
                 put("authenticated", status.authenticated)
                 put("dataHealthy", status.dataHealthy)
@@ -409,6 +433,7 @@ class WebServerManager(
                     val mac = settings.easyTouchThermostatMac.first()
                     if (mac.isNotBlank()) put(mac)
                 })
+                put("password", settings.easyTouchThermostatPassword.first())
                 put("connected", status.connected)
                 put("authenticated", status.authenticated)
                 put("dataHealthy", status.dataHealthy)
