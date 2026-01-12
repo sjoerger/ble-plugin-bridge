@@ -575,6 +575,12 @@ class WebServerManager(
             val json = JSONObject(body)
             val enable = json.getBoolean("enable")
             
+            // Update AppSettings first (like Android app does) so both UIs stay in sync
+            runBlocking {
+                val settings = AppSettings(context)
+                settings.setServiceEnabled(enable)
+            }
+            
             if (enable) {
                 // Start service
                 val intent = android.content.Intent(context, BaseBleService::class.java).apply {
@@ -631,7 +637,11 @@ class WebServerManager(
                 )
             }
             
+            // Update AppSettings first (like Android app does) so both UIs stay in sync
             runBlocking {
+                val settings = AppSettings(context)
+                settings.setMqttEnabled(enable)
+                
                 if (enable) {
                     // Reconnect MQTT
                     service.reconnectMqtt()
