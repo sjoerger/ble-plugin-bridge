@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.blemqttbridge.BuildConfig
 import com.blemqttbridge.R
 import com.blemqttbridge.core.interfaces.BleDevicePlugin
 import com.blemqttbridge.core.interfaces.BlePluginInterface
@@ -129,8 +130,13 @@ class BaseBleService : Service() {
     private var isScanning = false
     private var bluetoothEnabled = true
     
-    // Debug logging and trace
-    private val debugLogBuffer = ArrayDeque<String>()
+    // Service debug logging (separate from BLE trace)
+    private val serviceLogBuffer = ArrayDeque<String>()
+    private val MAX_SERVICE_LOG_LINES = 1000
+    
+    // BLE trace logging (for BLE events only)
+    private val bleTraceBuffer = ArrayDeque<String>()
+    private val MAX_BLE_TRACE_LINES = 1000
     private var traceEnabled = false
     private var traceWriter: java.io.BufferedWriter? = null
     private var traceFile: java.io.File? = null
@@ -199,6 +205,7 @@ class BaseBleService : Service() {
         
         override fun updateMqttStatus(connected: Boolean) {
             Log.i(TAG, "📊 updateMqttStatus: connected=$connected (was ${_mqttConnected.value})")
+            appendServiceLog("MQTT connection status: ${if (connected) "connected" else "disconnected"}")
             _mqttConnected.value = connected
         }
         
@@ -213,7 +220,7 @@ class BaseBleService : Service() {
         }
         
         override fun logBleEvent(message: String) {
-            appendDebugLog(message)
+            appendBleTrace(message)
         }
     }
     
@@ -237,6 +244,7 @@ class BaseBleService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "Service created")
+        appendServiceLog("Service created")
         
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
@@ -245,6 +253,7 @@ class BaseBleService : Service() {
         // Check if BLE is available
         if (bluetoothLeScanner == null) {
             Log.e(TAG, "BLE Scanner not available - device may not support Bluetooth Low Energy")
+            appendServiceLog("ERROR: BLE Scanner not available - device may not support Bluetooth Low Energy")
             bleNotAvailable = true
         }
         
@@ -299,6 +308,7 @@ class BaseBleService : Service() {
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "⚙️ onStartCommand: action=${intent?.action ?: "null"}, startId=$startId")
+        appendServiceLog("onStartCommand: action=${intent?.action ?: "null"}")
         
         when (intent?.action) {
             ACTION_START_SCAN -> {
@@ -435,6 +445,7 @@ class BaseBleService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service destroyed")
+        appendServiceLog("Service destroyed")
         
         // Mark service as stopped
         ServiceStateManager.setServiceRunning(applicationContext, false)
@@ -498,6 +509,7 @@ class BaseBleService : Service() {
         outputConfig: Map<String, String>
     ) {
         Log.i(TAG, "Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
+        appendServiceLog("Initializing plugins: BLE=$blePluginId, Output=$outputPluginId")
         
         // Load output plugin first (needed for publishing)
         // Note: Output plugin is optional for testing (MQTT needs broker config)
@@ -542,6 +554,7 @@ class BaseBleService : Service() {
             val devicePlugin = pluginRegistry.getDevicePlugin(blePluginId, applicationContext)
             if (devicePlugin == null) {
                 Log.e(TAG, "Failed to load BLE plugin: $blePluginId (not found in registry)")
+                appendServiceLog("ERROR: Failed to load BLE plugin: $blePluginId (not found in registry)")
                 updateNotification("Error: BLE plugin failed to load")
                 return
             } else {
@@ -642,6 +655,7 @@ class BaseBleService : Service() {
         
         if (loadedCount == 0) {
             Log.e(TAG, "No plugins were loaded!")
+            appendServiceLog("ERROR: No plugins were loaded!")
             updateNotification("Error: No plugins loaded")
             return
         }
@@ -1397,7 +1411,8 @@ class BaseBleService : Service() {
                 BluetoothProfile.STATE_CONNECTED -> {
                     // Only proceed if status is success
                     if (status != BluetoothGatt.GATT_SUCCESS) {
-                        Log.e(TAG, "❌ Connected but with error status: $statusName - closing connection")
+                            Log.e(TAG, "❌ Connected but with error status: $statusName - closing connection")
+                            appendServiceLog("ERROR: Connected to ${device.address} but with error status: $statusName - closing connection")
                         gatt.close()
                         connectedDevices.remove(device.address)
                         return
@@ -1496,6 +1511,7 @@ class BaseBleService : Service() {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 Log.i(TAG, "✅ Services discovered for ${gatt.device.address}")
+                appendServiceLog("Services discovered for ${gatt.device.address}")
                 
                 // Log all discovered services and characteristics
                 for (service in gatt.services) {
@@ -2184,17 +2200,30 @@ class BaseBleService : Service() {
     // =====================================================================
     
     /**
-     * Append a message to the debug log buffer (limited to MAX_DEBUG_LOG_LINES).
-     * Automatically mirrors to trace file if trace is active.
+     * Append a service event to the service log buffer (limited to MAX_SERVICE_LOG_LINES).
+     * This is for general service events, not BLE-specific events.
      */
-    private fun appendDebugLog(message: String) {
+    private fun appendServiceLog(message: String) {
         val ts = System.currentTimeMillis()
         val formatted = "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(ts))} - $message"
-        debugLogBuffer.addLast(formatted)
-        while (debugLogBuffer.size > MAX_DEBUG_LOG_LINES) {
-            debugLogBuffer.removeFirst()
+        serviceLogBuffer.addLast(formatted)
+        while (serviceLogBuffer.size > MAX_SERVICE_LOG_LINES) {
+            serviceLogBuffer.removeFirst()
         }
-        logTrace(message) // mirror into trace if enabled
+    }
+    
+    /**
+     * Append a BLE event to the BLE trace buffer and trace file if active.
+     * This is specifically for BLE GATT events and notifications.
+     */
+    private fun appendBleTrace(message: String) {
+        val ts = System.currentTimeMillis()
+        val formatted = "${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date(ts))} - $message"
+        bleTraceBuffer.addLast(formatted)
+        while (bleTraceBuffer.size > MAX_BLE_TRACE_LINES) {
+            bleTraceBuffer.removeFirst()
+        }
+        logTrace(message) // mirror into trace file if enabled
     }
     
     /**
@@ -2286,31 +2315,60 @@ class BaseBleService : Service() {
     fun exportDebugLog(): java.io.File? {
         return try {
             val dir = java.io.File(getExternalFilesDir(null), "logs")
-            if (!dir.exists()) dir.mkdirs()
+            if (!dir.exists()) {
+                val created = dir.mkdirs()
+                if (!created) {
+                    Log.e(TAG, "Failed to create logs directory: ${dir.absolutePath}")
+                    return null
+                }
+            }
+            
             val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
             val file = java.io.File(dir, "debug_${ts}.txt")
+            
             file.bufferedWriter().use { out ->
-                out.appendLine("BLE-MQTT Plugin Bridge debug log")
+                out.appendLine("BLE-MQTT Plugin Bridge Debug Log")
+                out.appendLine("================================")
                 out.appendLine("Timestamp: $ts")
-                out.appendLine("Service running: ${_serviceRunning.value}")
-                out.appendLine("Plugin statuses:")
-                _pluginStatuses.value.forEach { (pluginId, status) ->
-                    out.appendLine("  $pluginId: connected=${status.connected}, auth=${status.authenticated}, dataHealthy=${status.dataHealthy}")
-                }
-                out.appendLine("MQTT connected: ${_mqttConnected.value}")
-                out.appendLine("Trace active: $traceEnabled")
-                traceFile?.let { out.appendLine("Trace file: ${it.absolutePath}") }
-                out.appendLine("Active plugins:")
-                blePlugin?.let { out.appendLine("  - BLE: ${it.javaClass.simpleName}") }
-                outputPlugin?.let { out.appendLine("  - Output: ${it.javaClass.simpleName}") }
+                out.appendLine("App Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
                 out.appendLine("")
-                out.appendLine("Recent events:")
-                debugLogBuffer.forEach { line -> out.appendLine(line) }
+                
+                out.appendLine("Service Status:")
+                out.appendLine("  Running: ${_serviceRunning.value}")
+                out.appendLine("  MQTT Connected: ${_mqttConnected.value}")
+                out.appendLine("  BLE Trace Active: $traceEnabled")
+                traceFile?.let { out.appendLine("  Trace File: ${it.absolutePath}") }
+                out.appendLine("")
+                
+                out.appendLine("Plugin Statuses:")
+                _pluginStatuses.value.forEach { (pluginId, status) ->
+                    out.appendLine("  $pluginId:")
+                    out.appendLine("    Connected: ${status.connected}")
+                    out.appendLine("    Authenticated: ${status.authenticated}")
+                    out.appendLine("    Data Healthy: ${status.dataHealthy}")
+                }
+                out.appendLine("")
+                
+                out.appendLine("Active Plugins:")
+                blePlugin?.let { out.appendLine("  BLE: ${it.javaClass.simpleName}") }
+                outputPlugin?.let { out.appendLine("  Output: ${it.javaClass.simpleName}") }
+                out.appendLine("")
+                
+                out.appendLine("Recent Service Events (last $MAX_SERVICE_LOG_LINES):")
+                out.appendLine("=".repeat(50))
+                serviceLogBuffer.forEach { line -> out.appendLine(line) }
+                
+                if (serviceLogBuffer.isEmpty()) {
+                    out.appendLine("(No service events logged yet)")
+                }
             }
+            
             Log.i(TAG, "📝 Debug log exported: ${file.absolutePath}")
+            appendServiceLog("Debug log exported: ${file.name}")
             file
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to write debug log: ${e.message}")
+            Log.e(TAG, "Failed to write debug log: ${e.message}", e)
+            appendServiceLog("ERROR: Failed to export debug log: ${e.message}")
             null
         }
     }
